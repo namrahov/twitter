@@ -1,4 +1,4 @@
-package az.twitter.follow;
+package az.twitter.entity;
 
 import java.io.Serializable;
 

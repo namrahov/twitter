@@ -1,8 +1,10 @@
-package az.twitter.follow;
+package az.twitter.controller;
 
-import az.twitter.auth.CurrentUser;
-import az.twitter.common.CursorPage;
-import az.twitter.user.UserResponse;
+import az.twitter.dto.response.CursorPage;
+import az.twitter.dto.response.UserResponse;
+import az.twitter.security.CurrentUser;
+import az.twitter.service.FollowService;
+
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
 import org.springframework.http.HttpStatus;

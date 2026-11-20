@@ -1,4 +1,6 @@
-package az.twitter.auth;
+package az.twitter.config;
+
+import az.twitter.security.CurrentUserArgumentResolver;
 
 import java.util.List;
 
@@ -7,11 +9,11 @@ import org.springframework.web.method.support.HandlerMethodArgumentResolver;
 import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
 
 @Configuration
-public class AuthWebConfig implements WebMvcConfigurer {
+public class WebConfig implements WebMvcConfigurer {
 
     private final CurrentUserArgumentResolver currentUserArgumentResolver;
 
-    public AuthWebConfig(CurrentUserArgumentResolver currentUserArgumentResolver) {
+    public WebConfig(CurrentUserArgumentResolver currentUserArgumentResolver) {
         this.currentUserArgumentResolver = currentUserArgumentResolver;
     }
 

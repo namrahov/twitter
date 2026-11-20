@@ -1,4 +1,6 @@
-package az.twitter.follow;
+package az.twitter.entity;
+
+import az.twitter.repository.FollowRepository;
 
 import java.time.Instant;
 
@@ -13,7 +15,7 @@ import org.hibernate.annotations.Generated;
  */
 @Entity
 @Table(name = "follows")
-public class Follow {
+public class FollowEntity {
 
     @EmbeddedId
     private FollowId id;
@@ -22,7 +24,7 @@ public class Follow {
     @Column(name = "created_at", insertable = false, updatable = false)
     private Instant createdAt;
 
-    protected Follow() {
+    protected FollowEntity() {
     }
 
     public FollowId getId() {

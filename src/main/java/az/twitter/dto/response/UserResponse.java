@@ -1,4 +1,6 @@
-package az.twitter.user;
+package az.twitter.dto.response;
+
+import az.twitter.entity.UserEntity;
 
 import java.time.Instant;
 

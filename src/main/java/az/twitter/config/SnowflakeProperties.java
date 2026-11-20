@@ -1,4 +1,6 @@
-package az.twitter.id;
+package az.twitter.config;
+
+import az.twitter.util.SnowflakeIdGenerator;
 
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;

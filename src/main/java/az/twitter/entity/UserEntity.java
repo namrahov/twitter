@@ -1,4 +1,4 @@
-package az.twitter.user;
+package az.twitter.entity;
 
 import java.time.Instant;
 

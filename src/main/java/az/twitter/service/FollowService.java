@@ -1,11 +1,12 @@
-package az.twitter.follow;
+package az.twitter.service;
+
+import az.twitter.dto.response.CursorPage;
+import az.twitter.dto.response.UserResponse;
+import az.twitter.entity.UserEntity;
+import az.twitter.repository.FollowRepository;
 
 import java.util.List;
 
-import az.twitter.common.CursorPage;
-import az.twitter.user.UserEntity;
-import az.twitter.user.UserResponse;
-import az.twitter.user.UserService;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.domain.Limit;
 import org.springframework.http.HttpStatus;

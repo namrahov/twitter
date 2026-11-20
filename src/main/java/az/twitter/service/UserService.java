@@ -1,6 +1,10 @@
-package az.twitter.user;
+package az.twitter.service;
 
-import az.twitter.id.SnowflakeIdGenerator;
+import az.twitter.dto.request.CreateUserRequest;
+import az.twitter.entity.UserEntity;
+import az.twitter.repository.UserRepository;
+import az.twitter.util.SnowflakeIdGenerator;
+
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
