@@ -53,4 +53,12 @@ public interface FollowRepository extends JpaRepository<FollowEntity, FollowId> 
             ORDER BY f.id.followeeId
             """)
     List<UserEntity> findFollowing(@Param("userId") long userId, @Param("afterId") long afterId, Limit limit);
+
+    /** Ids only, for fan-out: index-only scan over idx_follows_followee, no join to users. */
+    @Query("""
+            SELECT f.id.followerId FROM FollowEntity f
+            WHERE f.id.followeeId = :userId AND f.id.followerId > :afterId
+            ORDER BY f.id.followerId
+            """)
+    List<Long> findFollowerIds(@Param("userId") long userId, @Param("afterId") long afterId, Limit limit);
 }
