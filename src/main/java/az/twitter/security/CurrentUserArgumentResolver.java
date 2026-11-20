@@ -1,4 +1,4 @@
-package az.twitter.auth;
+package az.twitter.security;
 
 import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.core.MethodParameter;

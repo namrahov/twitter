@@ -1,4 +1,4 @@
-package az.twitter.user;
+package az.twitter.dto.request;
 
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;

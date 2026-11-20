@@ -1,4 +1,4 @@
-package az.twitter.common;
+package az.twitter.dto.response;
 
 import java.util.List;
 import java.util.function.Function;

@@ -1,4 +1,4 @@
-package az.twitter.auth;
+package az.twitter.security;
 
 import java.lang.annotation.Documented;
 import java.lang.annotation.ElementType;

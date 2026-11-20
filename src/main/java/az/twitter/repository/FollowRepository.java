@@ -1,8 +1,11 @@
-package az.twitter.follow;
+package az.twitter.repository;
+
+import az.twitter.entity.FollowEntity;
+import az.twitter.entity.FollowId;
+import az.twitter.entity.UserEntity;
 
 import java.util.List;
 
-import az.twitter.user.UserEntity;
 import org.springframework.data.domain.Limit;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Modifying;
@@ -10,7 +13,7 @@ import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 import org.springframework.transaction.annotation.Transactional;
 
-public interface FollowRepository extends JpaRepository<Follow, FollowId> {
+public interface FollowRepository extends JpaRepository<FollowEntity, FollowId> {
 
     /**
      * Idempotent and race-free in one statement; JPA has no ON CONFLICT, so this one is native.
@@ -30,12 +33,12 @@ public interface FollowRepository extends JpaRepository<Follow, FollowId> {
     /** Bulk delete: unlike deleteById() it does not SELECT the row first. */
     @Transactional
     @Modifying
-    @Query("DELETE FROM Follow f WHERE f.id.followerId = :followerId AND f.id.followeeId = :followeeId")
+    @Query("DELETE FROM FollowEntity f WHERE f.id.followerId = :followerId AND f.id.followeeId = :followeeId")
     int delete(@Param("followerId") long followerId, @Param("followeeId") long followeeId);
 
     /** Keyset page over idx_follows_followee (followee_id, follower_id). */
     @Query("""
-            SELECT u FROM Follow f
+            SELECT u FROM FollowEntity f
             JOIN UserEntity u ON u.id = f.id.followerId
             WHERE f.id.followeeId = :userId AND f.id.followerId > :afterId
             ORDER BY f.id.followerId
@@ -44,7 +47,7 @@ public interface FollowRepository extends JpaRepository<Follow, FollowId> {
 
     /** Keyset page over the primary key (follower_id, followee_id). */
     @Query("""
-            SELECT u FROM Follow f
+            SELECT u FROM FollowEntity f
             JOIN UserEntity u ON u.id = f.id.followeeId
             WHERE f.id.followerId = :userId AND f.id.followeeId > :afterId
             ORDER BY f.id.followeeId

@@ -1,4 +1,8 @@
-package az.twitter.user;
+package az.twitter.controller;
+
+import az.twitter.dto.request.CreateUserRequest;
+import az.twitter.dto.response.UserResponse;
+import az.twitter.service.UserService;
 
 import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
