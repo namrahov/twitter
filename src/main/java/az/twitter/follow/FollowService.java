@@ -3,10 +3,11 @@ package az.twitter.follow;
 import java.util.List;
 
 import az.twitter.common.CursorPage;
-import az.twitter.user.User;
+import az.twitter.user.UserEntity;
 import az.twitter.user.UserResponse;
 import az.twitter.user.UserService;
 import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.data.domain.Limit;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.web.server.ResponseStatusException;
@@ -28,27 +29,27 @@ public class FollowService {
         }
         try {
             // Single statement, no "does the user exist?" round trip: the FK answers that.
-            follows.follow(followerId, followeeId);
+            follows.insertIfAbsent(followerId, followeeId);
         } catch (DataIntegrityViolationException e) {
             throw new ResponseStatusException(HttpStatus.NOT_FOUND, "User not found");
         }
     }
 
     public void unfollow(long followerId, long followeeId) {
-        follows.unfollow(followerId, followeeId);
+        follows.delete(followerId, followeeId);
     }
 
     public CursorPage<UserResponse> followers(long userId, long afterId, int limit) {
         users.requireExists(userId);
-        return page(follows.findFollowers(userId, afterId, limit + 1), limit);
+        return page(follows.findFollowers(userId, afterId, Limit.of(limit + 1)), limit);
     }
 
     public CursorPage<UserResponse> following(long userId, long afterId, int limit) {
         users.requireExists(userId);
-        return page(follows.findFollowing(userId, afterId, limit + 1), limit);
+        return page(follows.findFollowing(userId, afterId, Limit.of(limit + 1)), limit);
     }
 
-    private static CursorPage<UserResponse> page(List<User> rows, int limit) {
-        return CursorPage.of(rows, limit, User::id, UserResponse::from);
+    private static CursorPage<UserResponse> page(List<UserEntity> rows, int limit) {
+        return CursorPage.of(rows, limit, UserEntity::getId, UserResponse::from);
     }
 }

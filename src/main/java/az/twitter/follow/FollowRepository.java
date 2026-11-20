@@ -2,76 +2,52 @@ package az.twitter.follow;
 
 import java.util.List;
 
-import az.twitter.user.User;
-import az.twitter.user.UserRepository;
-import org.springframework.jdbc.core.simple.JdbcClient;
-import org.springframework.stereotype.Repository;
+import az.twitter.user.UserEntity;
+import org.springframework.data.domain.Limit;
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Modifying;
+import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.repository.query.Param;
+import org.springframework.transaction.annotation.Transactional;
 
-@Repository
-public class FollowRepository {
-
-    private final JdbcClient jdbc;
-
-    public FollowRepository(JdbcClient jdbc) {
-        this.jdbc = jdbc;
-    }
+public interface FollowRepository extends JpaRepository<Follow, FollowId> {
 
     /**
-     * Idempotent: an existing follow is left as is.
+     * Idempotent and race-free in one statement; JPA has no ON CONFLICT, so this one is native.
      *
-     * @return true if a new follow row was created
+     * @return 1 if a new follow was created, 0 if it already existed
      * @throws org.springframework.dao.DataIntegrityViolationException if either user does not exist (FK)
      */
-    public boolean follow(long followerId, long followeeId) {
-        return jdbc.sql("""
-                        INSERT INTO follows (follower_id, followee_id)
-                        VALUES (:followerId, :followeeId)
-                        ON CONFLICT (follower_id, followee_id) DO NOTHING
-                        """)
-                .param("followerId", followerId)
-                .param("followeeId", followeeId)
-                .update() == 1;
-    }
+    @Transactional
+    @Modifying
+    @Query(value = """
+            INSERT INTO follows (follower_id, followee_id)
+            VALUES (:followerId, :followeeId)
+            ON CONFLICT (follower_id, followee_id) DO NOTHING
+            """, nativeQuery = true)
+    int insertIfAbsent(@Param("followerId") long followerId, @Param("followeeId") long followeeId);
 
-    /** @return true if a follow row was deleted */
-    public boolean unfollow(long followerId, long followeeId) {
-        return jdbc.sql("DELETE FROM follows WHERE follower_id = :followerId AND followee_id = :followeeId")
-                .param("followerId", followerId)
-                .param("followeeId", followeeId)
-                .update() == 1;
-    }
+    /** Bulk delete: unlike deleteById() it does not SELECT the row first. */
+    @Transactional
+    @Modifying
+    @Query("DELETE FROM Follow f WHERE f.id.followerId = :followerId AND f.id.followeeId = :followeeId")
+    int delete(@Param("followerId") long followerId, @Param("followeeId") long followeeId);
 
     /** Keyset page over idx_follows_followee (followee_id, follower_id). */
-    public List<User> findFollowers(long userId, long afterId, int limit) {
-        return jdbc.sql("""
-                        SELECT u.id, u.username, u.display_name, u.created_at
-                        FROM follows f
-                        JOIN users u ON u.id = f.follower_id
-                        WHERE f.followee_id = :userId AND f.follower_id > :afterId
-                        ORDER BY f.follower_id
-                        LIMIT :limit
-                        """)
-                .param("userId", userId)
-                .param("afterId", afterId)
-                .param("limit", limit)
-                .query(UserRepository::map)
-                .list();
-    }
+    @Query("""
+            SELECT u FROM Follow f
+            JOIN UserEntity u ON u.id = f.id.followerId
+            WHERE f.id.followeeId = :userId AND f.id.followerId > :afterId
+            ORDER BY f.id.followerId
+            """)
+    List<UserEntity> findFollowers(@Param("userId") long userId, @Param("afterId") long afterId, Limit limit);
 
     /** Keyset page over the primary key (follower_id, followee_id). */
-    public List<User> findFollowing(long userId, long afterId, int limit) {
-        return jdbc.sql("""
-                        SELECT u.id, u.username, u.display_name, u.created_at
-                        FROM follows f
-                        JOIN users u ON u.id = f.followee_id
-                        WHERE f.follower_id = :userId AND f.followee_id > :afterId
-                        ORDER BY f.followee_id
-                        LIMIT :limit
-                        """)
-                .param("userId", userId)
-                .param("afterId", afterId)
-                .param("limit", limit)
-                .query(UserRepository::map)
-                .list();
-    }
+    @Query("""
+            SELECT u FROM Follow f
+            JOIN UserEntity u ON u.id = f.id.followeeId
+            WHERE f.id.followerId = :userId AND f.id.followeeId > :afterId
+            ORDER BY f.id.followeeId
+            """)
+    List<UserEntity> findFollowing(@Param("userId") long userId, @Param("afterId") long afterId, Limit limit);
 }
