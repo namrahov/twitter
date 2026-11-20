@@ -18,6 +18,22 @@ spring:
   mvc:
     problemdetails:
       enabled: true
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6380}
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    producer:
+      # Wait for all in-sync replicas; idempotence stops broker-side duplicates on producer retries.
+      acks: all
+      properties:
+        enable.idempotence: true
+        # send() blocks up to this long when the broker is unreachable (default 60 s) while holding outbox row locks.
+        max.block.ms: 5000
+    consumer:
+      # A new consumer group starts from the beginning, so no event published before it existed is skipped.
+      auto-offset-reset: earliest
 
 server:
   port: ${SERVER_PORT:8080}
