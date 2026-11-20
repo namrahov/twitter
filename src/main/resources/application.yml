@@ -2,8 +2,8 @@ spring:
   application:
     name: twitter
   datasource:
-    url: ${DB_URL:jdbc:postgresql://localhost:5433/twitter}
-    username: ${DB_USERNAME:postgres}
+    url: jdbc:postgresql://localhost:5433/twitter
+    username: postgres
     password: Genius33Frozen
     hikari:
       maximum-pool-size: 10
