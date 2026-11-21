@@ -16,6 +16,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
+import com.github.benmanes.caffeine.cache.Cache;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.dao.DataAccessException;
@@ -35,14 +36,17 @@ public class PostService {
 
     private final PostRepository posts;
     private final PostContentCacheRepository contentCache;
+    private final Cache<Long, CachedPost> localCache;
     private final OutboxService outbox;
     private final UserService users;
     private final SnowflakeIdGenerator ids;
 
-    public PostService(PostRepository posts, PostContentCacheRepository contentCache, OutboxService outbox,
+    public PostService(PostRepository posts, PostContentCacheRepository contentCache,
+                       Cache<Long, CachedPost> tweetLocalCache, OutboxService outbox,
                        UserService users, SnowflakeIdGenerator ids) {
         this.posts = posts;
         this.contentCache = contentCache;
+        this.localCache = tweetLocalCache;
         this.outbox = outbox;
         this.users = users;
         this.ids = ids;
@@ -87,22 +91,29 @@ public class PostService {
     }
 
     /**
-     * Cache-aside, batched: one MGET for all ids, one SQL query for the misses, then the misses are cached.
+     * Three tiers, each asked only for what the previous one lacked:
+     * L1 (this JVM, Caffeine) → L2 (Redis, one MGET) → PostgreSQL (one query); found entries fill the tiers above.
      * Result keeps the order of {@code ids}; ids that do not exist are skipped.
-     * If Redis is unavailable, reads go straight to PostgreSQL (slower, but the page still loads).
+     * If Redis is unavailable, L2 is skipped (slower, but the page still loads).
      */
     public List<CachedPost> getMany(List<Long> ids) {
         if (ids.isEmpty()) {
             return List.of();
         }
-        Map<Long, CachedPost> byId = new HashMap<>();
-        try {
-            byId.putAll(contentCache.getAll(ids));
-        } catch (DataAccessException e) {
-            log.warn("Tweet content cache unavailable, reading from DB: {}", e.getMessage());
+        Map<Long, CachedPost> byId = new HashMap<>(localCache.getAllPresent(ids));
+
+        List<Long> notLocal = ids.stream().filter(id -> !byId.containsKey(id)).toList();
+        if (!notLocal.isEmpty()) {
+            try {
+                Map<Long, CachedPost> fromRedis = contentCache.getAll(notLocal);
+                byId.putAll(fromRedis);
+                localCache.putAll(fromRedis);
+            } catch (DataAccessException e) {
+                log.warn("Tweet content cache unavailable, reading from DB: {}", e.getMessage());
+            }
         }
 
-        List<Long> missing = ids.stream().filter(id -> !byId.containsKey(id)).toList();
+        List<Long> missing = notLocal.stream().filter(id -> !byId.containsKey(id)).toList();
         if (!missing.isEmpty()) {
             List<CachedPost> loaded = posts.findAllById(missing).stream().map(CachedPost::from).toList();
             loaded.forEach(p -> byId.put(p.id(), p));
@@ -125,8 +136,9 @@ public class PostService {
         return CursorPage.of(rows, limit, PostEntity::getId, PostResponse::from);
     }
 
-    /** The cache is an optimisation: failing to fill it must not fail the request. */
+    /** Fills L1 and L2. The caches are an optimisation: failing to fill Redis must not fail the request. */
     private void cacheQuietly(List<CachedPost> toCache) {
+        toCache.forEach(p -> localCache.put(p.id(), p));
         try {
             contentCache.putAll(toCache);
         } catch (DataAccessException e) {

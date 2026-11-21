@@ -147,36 +147,42 @@ public abstract class SortedIdCache {
         }
     }
 
+    /** One page to read: ids of {@code source} older than {@code beforeId}, at most {@code limit}. */
+    public record Read(Source source, long beforeId, int limit) {
+    }
+
     /**
-     * Reads a page from many lists, possibly of different caches, in <b>one</b> pipelined round trip:
+     * Reads many pages, possibly from different caches, in <b>one</b> pipelined round trip:
      * per list EXPIRE (refresh the sliding TTL and learn whether it exists), ZREVRANGEBYLEX (the page) and ZCARD.
      * All caches must use the same Redis.
      */
-    public static List<SourcePage> readPages(List<Source> sources, long beforeId, int limit) {
-        if (sources.isEmpty()) {
+    public static List<SourcePage> readPages(List<Read> reads) {
+        if (reads.isEmpty()) {
             return List.of();
         }
-        Range<String> range = beforeId == Long.MAX_VALUE
-                ? Range.unbounded()
-                : Range.leftUnbounded(Range.Bound.exclusive(member(beforeId)));
         // Through methods, not fields: the caches are Spring beans behind CGLIB proxies, whose own fields are null.
-        StringRedisTemplate redis = sources.getFirst().cache().template();
+        StringRedisTemplate redis = reads.getFirst().source().cache().template();
 
         List<Object> replies = redis.executePipelined(new SessionCallback<Object>() {
             @Override
             @SuppressWarnings("unchecked")
             public <K, V> Object execute(RedisOperations<K, V> operations) {
                 var ops = (RedisOperations<String, String>) operations;
-                for (Source source : sources) {
+                for (Read read : reads) {
+                    Source source = read.source();
                     String key = source.cache().keyOf(source.ownerId());
+                    Range<String> range = read.beforeId() == Long.MAX_VALUE
+                            ? Range.unbounded()
+                            : Range.leftUnbounded(Range.Bound.exclusive(member(read.beforeId())));
                     ops.expire(key, source.cache().ttl());
-                    ops.opsForZSet().reverseRangeByLex(key, range, Limit.limit().count(limit));
+                    ops.opsForZSet().reverseRangeByLex(key, range, Limit.limit().count(read.limit()));
                     ops.opsForZSet().zCard(key);
                 }
                 return null;
             }
         });
 
+        List<Source> sources = reads.stream().map(Read::source).toList();
         List<SourcePage> pages = new ArrayList<>(sources.size());
         for (int i = 0; i < sources.size(); i++) {
             boolean exists = Boolean.TRUE.equals(replies.get(3 * i));
