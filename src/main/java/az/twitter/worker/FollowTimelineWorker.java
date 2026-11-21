@@ -7,6 +7,7 @@ import az.twitter.entity.FollowId;
 import az.twitter.repository.FollowRepository;
 import az.twitter.repository.PostRepository;
 import az.twitter.repository.TimelineCacheRepository;
+import az.twitter.repository.UserRepository;
 
 import java.util.List;
 
@@ -34,13 +35,15 @@ public class FollowTimelineWorker {
     static final int BACKFILL_SIZE = 50;
 
     private final FollowRepository follows;
+    private final UserRepository users;
     private final PostRepository posts;
     private final TimelineCacheRepository timelines;
     private final JsonMapper json;
 
-    public FollowTimelineWorker(FollowRepository follows, PostRepository posts,
+    public FollowTimelineWorker(FollowRepository follows, UserRepository users, PostRepository posts,
                                 TimelineCacheRepository timelines, JsonMapper json) {
         this.follows = follows;
+        this.users = users;
         this.posts = posts;
         this.timelines = timelines;
         this.json = json;
@@ -60,8 +63,12 @@ public class FollowTimelineWorker {
         if (!isFollowing(event.followerId(), event.followeeId())) {
             return;
         }
+        // Celebrity tweets are pulled at read time (from the follows table), nothing to push.
+        if (users.isCelebrity(event.followeeId())) {
+            return;
+        }
         List<Long> tweetIds = posts.findLatestIds(event.followeeId(), Limit.of(BACKFILL_SIZE));
-        timelines.addTweetsToTimeline(event.followerId(), tweetIds);
+        timelines.addAll(event.followerId(), tweetIds);
         log.debug("Backfilled {} tweets of {} into timeline of {}",
                 tweetIds.size(), event.followeeId(), event.followerId());
     }
@@ -76,7 +83,8 @@ public class FollowTimelineWorker {
             return;
         }
         List<Long> tweetIds = posts.findLatestIds(event.followeeId(), Limit.of(TimelineCacheRepository.MAX_ENTRIES));
-        timelines.removeFromTimeline(event.followerId(), tweetIds);
+        // Also for celebrities: tweets pushed before they became one may still be in the timeline.
+        timelines.removeAll(event.followerId(), tweetIds);
         log.debug("Removed up to {} tweets of {} from timeline of {}",
                 tweetIds.size(), event.followeeId(), event.followerId());
     }

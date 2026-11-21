@@ -31,12 +31,18 @@ public interface PostRepository extends JpaRepository<PostEntity, Long> {
             """)
     List<PostEntity> findHomeTimeline(@Param("userId") long userId, @Param("beforeId") long beforeId, Limit limit);
 
-    /** Same rows as {@link #findHomeTimeline}, ids only: used to rebuild an expired Redis timeline. */
-    @Query("""
-            SELECT p.id FROM PostEntity p
-            WHERE p.userId = :userId
-               OR p.userId IN (SELECT f.id.followeeId FROM FollowEntity f WHERE f.id.followerId = :userId)
+    /**
+     * Rebuilds the push part of an expired Redis timeline: own tweets and those of followed non-celebrities.
+     * Celebrity tweets are left out on purpose, they are pulled at read time.
+     */
+    @Query(value = """
+            SELECT p.id FROM posts p
+            WHERE p.user_id = :userId
+               OR p.user_id IN (SELECT f.followee_id FROM follows f
+                                JOIN users u ON u.id = f.followee_id
+                                WHERE f.follower_id = :userId AND NOT u.celebrity)
             ORDER BY p.id DESC
-            """)
-    List<Long> findHomeTimelineIds(@Param("userId") long userId, Limit limit);
+            LIMIT :limit
+            """, nativeQuery = true)
+    List<Long> findPushedTimelineIds(@Param("userId") long userId, @Param("limit") int limit);
 }

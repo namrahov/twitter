@@ -61,4 +61,12 @@ public interface FollowRepository extends JpaRepository<FollowEntity, FollowId> 
             ORDER BY f.id.followerId
             """)
     List<Long> findFollowerIds(@Param("userId") long userId, @Param("afterId") long afterId, Limit limit);
+
+    /** Celebrities the user follows: their tweets are pulled at read time (PK range scan + users PK lookups). */
+    @Query(value = """
+            SELECT f.followee_id FROM follows f
+            JOIN users u ON u.id = f.followee_id
+            WHERE f.follower_id = :userId AND u.celebrity
+            """, nativeQuery = true)
+    List<Long> findCelebrityFolloweeIds(@Param("userId") long userId);
 }

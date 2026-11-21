@@ -38,6 +38,12 @@ spring:
 server:
   port: ${SERVER_PORT:8080}
 
+twitter:
+  timeline:
+    # Accounts with at least this many followers become "celebrities": their tweets are not pushed into
+    # followers' timelines (fan-out on write) but pulled when a follower reads (fan-out on read).
+    celebrity-threshold: ${CELEBRITY_THRESHOLD:10000}
+
 management:
   endpoints:
     web:
