@@ -7,6 +7,7 @@ import az.twitter.dto.response.PostResponse;
 import az.twitter.entity.PostEntity;
 import az.twitter.repository.PostContentCacheRepository;
 import az.twitter.repository.PostRepository;
+import az.twitter.repository.RebuildLockRepository;
 import az.twitter.util.SnowflakeIdGenerator;
 
 import java.time.Instant;
@@ -14,9 +15,12 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 
-import com.github.benmanes.caffeine.cache.Cache;
+import com.github.benmanes.caffeine.cache.AsyncCache;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.dao.DataAccessException;
@@ -36,17 +40,19 @@ public class PostService {
 
     private final PostRepository posts;
     private final PostContentCacheRepository contentCache;
-    private final Cache<Long, CachedPost> localCache;
+    private final AsyncCache<Long, CachedPost> localCache;
+    private final RebuildLockRepository locks;
     private final OutboxService outbox;
     private final UserService users;
     private final SnowflakeIdGenerator ids;
 
     public PostService(PostRepository posts, PostContentCacheRepository contentCache,
-                       Cache<Long, CachedPost> tweetLocalCache, OutboxService outbox,
-                       UserService users, SnowflakeIdGenerator ids) {
+                       AsyncCache<Long, CachedPost> tweetLocalCache, RebuildLockRepository locks,
+                       OutboxService outbox, UserService users, SnowflakeIdGenerator ids) {
         this.posts = posts;
         this.contentCache = contentCache;
         this.localCache = tweetLocalCache;
+        this.locks = locks;
         this.outbox = outbox;
         this.users = users;
         this.ids = ids;
@@ -92,33 +98,19 @@ public class PostService {
 
     /**
      * Three tiers, each asked only for what the previous one lacked:
-     * L1 (this JVM, Caffeine) → L2 (Redis, one MGET) → PostgreSQL (one query); found entries fill the tiers above.
-     * Result keeps the order of {@code ids}; ids that do not exist are skipped.
-     * If Redis is unavailable, L2 is skipped (slower, but the page still loads).
+     * L1 (this JVM, Caffeine) → L2 (Redis, one MGET) → PostgreSQL. Result keeps the order of {@code ids};
+     * ids that do not exist are skipped.
+     *
+     * <p>Stampede protection: concurrent requests missing the same tweet in L1 share one load (async cache),
+     * and across instances only the holder of a per-tweet Redis lock reads it from PostgreSQL.
      */
     public List<CachedPost> getMany(List<Long> ids) {
         if (ids.isEmpty()) {
             return List.of();
         }
-        Map<Long, CachedPost> byId = new HashMap<>(localCache.getAllPresent(ids));
-
-        List<Long> notLocal = ids.stream().filter(id -> !byId.containsKey(id)).toList();
-        if (!notLocal.isEmpty()) {
-            try {
-                Map<Long, CachedPost> fromRedis = contentCache.getAll(notLocal);
-                byId.putAll(fromRedis);
-                localCache.putAll(fromRedis);
-            } catch (DataAccessException e) {
-                log.warn("Tweet content cache unavailable, reading from DB: {}", e.getMessage());
-            }
-        }
-
-        List<Long> missing = notLocal.stream().filter(id -> !byId.containsKey(id)).toList();
-        if (!missing.isEmpty()) {
-            List<CachedPost> loaded = posts.findAllById(missing).stream().map(CachedPost::from).toList();
-            loaded.forEach(p -> byId.put(p.id(), p));
-            cacheQuietly(loaded);
-        }
+        Map<Long, CachedPost> byId = localCache
+                .getAll(ids, (missing, executor) -> CompletableFuture.completedFuture(loadFromRedisOrDb(missing)))
+                .join();
 
         List<CachedPost> result = new ArrayList<>(ids.size());
         for (Long id : ids) {
@@ -136,9 +128,79 @@ public class PostService {
         return CursorPage.of(rows, limit, PostEntity::getId, PostResponse::from);
     }
 
+    /** L1 miss: Redis, then PostgreSQL under a per-tweet lock. Returned entries are put into L1 by the caller. */
+    private Map<Long, CachedPost> loadFromRedisOrDb(Set<? extends Long> ids) {
+        Map<Long, CachedPost> found = new HashMap<>();
+        try {
+            found.putAll(contentCache.getAll(List.copyOf(ids)));
+        } catch (DataAccessException e) {
+            // Redis down: no cache and no locks to coordinate with, go to the DB directly.
+            log.warn("Tweet content cache unavailable, reading from DB: {}", e.getMessage());
+            loadFromDb(ids.stream().map(Long::valueOf).toList(), found);
+            return found;
+        }
+
+        List<Long> mine = new ArrayList<>();
+        List<Long> waiting = new ArrayList<>();
+        Map<Long, String> tokens = new HashMap<>();
+        for (Long id : ids) {
+            if (found.containsKey(id)) {
+                continue;
+            }
+            Optional<String> token = tryLock(id);
+            if (token.isPresent()) {
+                tokens.put(id, token.get());
+                mine.add(id);
+            } else {
+                waiting.add(id);
+            }
+        }
+
+        try {
+            if (!mine.isEmpty()) {
+                // Double-check: another instance may have filled Redis between our MGET and our lock.
+                found.putAll(contentCache.getAll(mine));
+                loadFromDb(mine.stream().filter(id -> !found.containsKey(id)).toList(), found);
+            }
+        } finally {
+            tokens.forEach((id, token) -> locks.release(lockName(id), token));
+        }
+
+        // Someone else is loading these: wait briefly for them to appear in Redis instead of hitting the DB too.
+        for (int attempt = 0; attempt < StampedeWait.ATTEMPTS && !waiting.isEmpty(); attempt++) {
+            StampedeWait.pause();
+            found.putAll(contentCache.getAll(waiting));
+            waiting = waiting.stream().filter(id -> !found.containsKey(id)).toList();
+        }
+        // Still missing (lock holder slow or died): the tweet must show, so read it ourselves as a last resort.
+        loadFromDb(waiting, found);
+        return found;
+    }
+
+    private void loadFromDb(List<Long> ids, Map<Long, CachedPost> into) {
+        if (ids.isEmpty()) {
+            return;
+        }
+        List<CachedPost> loaded = posts.findByIds(ids).stream().map(CachedPost::from).toList();
+        loaded.forEach(p -> into.put(p.id(), p));
+        try {
+            contentCache.putAll(loaded);
+        } catch (DataAccessException e) {
+            log.warn("Could not cache {} tweets: {}", loaded.size(), e.getMessage());
+        }
+    }
+
+    private Optional<String> tryLock(long tweetId) {
+        return locks.tryAcquire(lockName(tweetId));
+    }
+
+    private static String lockName(long tweetId) {
+        return "rebuild:tweet:" + tweetId;
+    }
+
     /** Fills L1 and L2. The caches are an optimisation: failing to fill Redis must not fail the request. */
     private void cacheQuietly(List<CachedPost> toCache) {
-        toCache.forEach(p -> localCache.put(p.id(), p));
+        toCache.forEach(p -> localCache.synchronous().put(p.id(), p));
         try {
             contentCache.putAll(toCache);
         } catch (DataAccessException e) {

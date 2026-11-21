@@ -2,6 +2,7 @@ package az.twitter.repository;
 
 import az.twitter.entity.PostEntity;
 
+import java.util.Collection;
 import java.util.List;
 
 import org.springframework.data.domain.Limit;
@@ -10,6 +11,13 @@ import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
 public interface PostRepository extends JpaRepository<PostEntity, Long> {
+
+    /**
+     * One {@code SELECT ... WHERE id IN (...)} for all ids. (findAllById is not used for this: with Hibernate 7
+     * it multi-loads, i.e. runs one SELECT per id.)
+     */
+    @Query("SELECT p FROM PostEntity p WHERE p.id IN :ids")
+    List<PostEntity> findByIds(@Param("ids") Collection<Long> ids);
 
     /** Profile timeline, keyset page over idx_posts_user_id (user_id, id DESC). */
     List<PostEntity> findByUserIdAndIdLessThanOrderByIdDesc(long userId, long beforeId, Limit limit);
