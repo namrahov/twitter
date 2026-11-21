@@ -2,8 +2,10 @@ package az.twitter.worker;
 
 import az.twitter.config.KafkaConfig;
 import az.twitter.dto.event.TweetCreatedEvent;
+import az.twitter.repository.CelebrityPostsCacheRepository;
 import az.twitter.repository.FollowRepository;
 import az.twitter.repository.TimelineCacheRepository;
+import az.twitter.repository.UserRepository;
 
 import java.util.List;
 
@@ -15,7 +17,12 @@ import org.springframework.stereotype.Component;
 import tools.jackson.databind.json.JsonMapper;
 
 /**
- * Fan-out on write: pushes a new tweet id into the author's and every follower's Redis timeline.
+ * Hybrid fan-out:
+ * <ul>
+ *   <li>normal author → push: tweet id goes into the author's and every follower's Redis timeline;</li>
+ *   <li>celebrity author → no push to followers (20M writes per tweet would take minutes); the id goes into the
+ *       celebrity's own posts list once, and followers pull it when they read.</li>
+ * </ul>
  * Lives in this app for now; it only talks to Kafka, Postgres and Redis, so it can move to its own service later.
  */
 @Component
@@ -25,12 +32,17 @@ public class FanoutWorker {
     private static final int FOLLOWER_BATCH = 1000;
 
     private final FollowRepository follows;
+    private final UserRepository users;
     private final TimelineCacheRepository timelines;
+    private final CelebrityPostsCacheRepository celebrityPosts;
     private final JsonMapper json;
 
-    public FanoutWorker(FollowRepository follows, TimelineCacheRepository timelines, JsonMapper json) {
+    public FanoutWorker(FollowRepository follows, UserRepository users, TimelineCacheRepository timelines,
+                        CelebrityPostsCacheRepository celebrityPosts, JsonMapper json) {
         this.follows = follows;
+        this.users = users;
         this.timelines = timelines;
+        this.celebrityPosts = celebrityPosts;
         this.json = json;
     }
 
@@ -42,7 +54,14 @@ public class FanoutWorker {
     public void onTweetCreated(String payload) {
         TweetCreatedEvent event = json.readValue(payload, TweetCreatedEvent.class);
 
-        timelines.addToTimelines(List.of(event.authorId()), event.tweetId());
+        // The author always sees their own tweet in their own timeline.
+        timelines.addToEach(List.of(event.authorId()), event.tweetId());
+
+        if (users.isCelebrity(event.authorId())) {
+            celebrityPosts.addToEach(List.of(event.authorId()), event.tweetId());
+            log.debug("Tweet {} by celebrity {}: pull model, no fan-out", event.tweetId(), event.authorId());
+            return;
+        }
 
         long afterId = 0;
         int total = 0;
@@ -51,7 +70,7 @@ public class FanoutWorker {
             if (followerIds.isEmpty()) {
                 break;
             }
-            timelines.addToTimelines(followerIds, event.tweetId());
+            timelines.addToEach(followerIds, event.tweetId());
             total += followerIds.size();
             if (followerIds.size() < FOLLOWER_BATCH) {
                 break;
