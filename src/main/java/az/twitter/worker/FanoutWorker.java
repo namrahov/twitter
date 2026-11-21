@@ -1,12 +1,14 @@
 package az.twitter.worker;
 
 import az.twitter.config.KafkaConfig;
+import az.twitter.dto.cache.CacheInvalidation.LocalCache;
 import az.twitter.dto.event.TweetCreatedEvent;
 import az.twitter.repository.CelebrityPostsCacheRepository;
 import az.twitter.repository.FanoutProgressRepository;
 import az.twitter.repository.FollowRepository;
 import az.twitter.repository.TimelineCacheRepository;
 import az.twitter.repository.UserRepository;
+import az.twitter.service.CacheInvalidationService;
 
 import java.util.List;
 
@@ -37,16 +39,18 @@ public class FanoutWorker {
     private final TimelineCacheRepository timelines;
     private final CelebrityPostsCacheRepository celebrityPosts;
     private final FanoutProgressRepository progress;
+    private final CacheInvalidationService invalidation;
     private final JsonMapper json;
 
     public FanoutWorker(FollowRepository follows, UserRepository users, TimelineCacheRepository timelines,
                         CelebrityPostsCacheRepository celebrityPosts, FanoutProgressRepository progress,
-                        JsonMapper json) {
+                        CacheInvalidationService invalidation, JsonMapper json) {
         this.follows = follows;
         this.users = users;
         this.timelines = timelines;
         this.celebrityPosts = celebrityPosts;
         this.progress = progress;
+        this.invalidation = invalidation;
         this.json = json;
     }
 
@@ -64,6 +68,9 @@ public class FanoutWorker {
 
         if (users.isCelebrity(event.authorId())) {
             celebrityPosts.addToEach(List.of(event.authorId()), event.tweetId());
+            // Every instance drops its L1 copy of this list now, so followers see the tweet on their next read.
+            // If this fails, Kafka redelivers and both steps run again (the ZADD is idempotent).
+            invalidation.publish(LocalCache.CELEBRITY_POSTS, event.authorId());
             log.debug("Tweet {} by celebrity {}: pull model, no fan-out", event.tweetId(), event.authorId());
             return;
         }
