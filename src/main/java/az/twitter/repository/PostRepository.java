@@ -14,6 +14,10 @@ public interface PostRepository extends JpaRepository<PostEntity, Long> {
     /** Profile timeline, keyset page over idx_posts_user_id (user_id, id DESC). */
     List<PostEntity> findByUserIdAndIdLessThanOrderByIdDesc(long userId, long beforeId, Limit limit);
 
+    /** Newest post ids of one author; index-only over idx_posts_user_id. */
+    @Query("SELECT p.id FROM PostEntity p WHERE p.userId = :userId ORDER BY p.id DESC")
+    List<Long> findLatestIds(@Param("userId") long userId, Limit limit);
+
     /**
      * Home timeline computed on read (the original JOIN from the design notes).
      * Used only when Redis has no (more) precomputed entries for the user.
