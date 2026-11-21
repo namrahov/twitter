@@ -1,8 +1,8 @@
 package az.twitter.service;
 
+import az.twitter.dto.cache.CachedPost;
 import az.twitter.dto.response.CursorPage;
 import az.twitter.dto.response.PostResponse;
-import az.twitter.entity.PostEntity;
 import az.twitter.repository.CelebrityPostsCacheRepository;
 import az.twitter.repository.FollowRepository;
 import az.twitter.repository.PostRepository;
@@ -12,10 +12,7 @@ import az.twitter.repository.TimelineCacheRepository;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
-import java.util.Map;
 import java.util.TreeSet;
-import java.util.function.Function;
-import java.util.stream.Collectors;
 
 import org.springframework.data.domain.Limit;
 import org.springframework.stereotype.Service;
@@ -36,13 +33,15 @@ public class TimelineService {
     private final CelebrityPostsCacheRepository celebrityPosts;
     private final FollowRepository follows;
     private final PostRepository posts;
+    private final PostService postService;
 
     public TimelineService(TimelineCacheRepository timelines, CelebrityPostsCacheRepository celebrityPosts,
-                           FollowRepository follows, PostRepository posts) {
+                           FollowRepository follows, PostRepository posts, PostService postService) {
         this.timelines = timelines;
         this.celebrityPosts = celebrityPosts;
         this.follows = follows;
         this.posts = posts;
+        this.postService = postService;
     }
 
     public CursorPage<PostResponse> home(long userId, long beforeId, int limit) {
@@ -71,14 +70,16 @@ public class TimelineService {
 
         long reliableAbove = floor;
         List<Long> ids = candidates.stream().filter(id -> id > reliableAbove).limit(wanted).toList();
-        List<PostEntity> rows = new ArrayList<>(loadInOrder(ids));
+        // Content: from the tweet:{id} cache, PostgreSQL only for misses.
+        List<CachedPost> rows = new ArrayList<>(postService.getMany(ids));
 
         // SQL (the full JOIN over all followees) fills the rest: deep pages, trimmed or empty caches.
         if (ids.size() < wanted) {
             long sqlBefore = ids.isEmpty() ? beforeId : ids.getLast();
-            rows.addAll(posts.findHomeTimeline(userId, sqlBefore, Limit.of(wanted - ids.size())));
+            posts.findHomeTimeline(userId, sqlBefore, Limit.of(wanted - ids.size()))
+                    .forEach(p -> rows.add(CachedPost.from(p)));
         }
-        return CursorPage.of(rows, limit, PostEntity::getId, PostResponse::from);
+        return CursorPage.of(rows, limit, CachedPost::id, PostResponse::from);
     }
 
     /**
@@ -98,15 +99,5 @@ public class TimelineService {
             return Long.MIN_VALUE;
         }
         return page.isEmpty() ? beforeId : page.getLast() - 1;
-    }
-
-    /** One batched query for all ids, then back into the timeline's order. Deleted posts are skipped. */
-    private List<PostEntity> loadInOrder(List<Long> ids) {
-        if (ids.isEmpty()) {
-            return List.of();
-        }
-        Map<Long, PostEntity> byId = posts.findAllById(ids).stream()
-                .collect(Collectors.toMap(PostEntity::getId, Function.identity()));
-        return ids.stream().map(byId::get).filter(p -> p != null).toList();
     }
 }
