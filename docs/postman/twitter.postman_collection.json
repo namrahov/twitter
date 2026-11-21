@@ -6,6 +6,7 @@
   },
   "variable": [
     { "key": "baseUrl", "value": "http://localhost:8080" },
+    { "key": "baseUrl2", "value": "http://localhost:8081" },
     { "key": "aliId", "value": "117404340594933760" },
     { "key": "veliId", "value": "117404341194719232" },
     { "key": "nigarId", "value": "117404341446377472" }
@@ -51,6 +52,22 @@
       "request": {
         "method": "GET",
         "url": "{{baseUrl}}/users/{{aliId}}/posts"
+      }
+    },
+    {
+      "name": "6. L1 (Caffeine) cache of instance 1",
+      "request": {
+        "method": "GET",
+        "description": "What this instance holds in its in-process cache. Read a timeline first (request 2), then call this.",
+        "url": "{{baseUrl}}/admin/cache/l1?limit=50"
+      }
+    },
+    {
+      "name": "7. L1 (Caffeine) cache of instance 2",
+      "request": {
+        "method": "GET",
+        "description": "Same for a second instance (start it with SERVER_PORT=8081). Each instance has its own L1, so the two can differ.",
+        "url": "{{baseUrl2}}/admin/cache/l1?limit=50"
       }
     }
   ]
