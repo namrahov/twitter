@@ -2,6 +2,7 @@ package az.twitter.repository;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashSet;
 import java.util.List;
@@ -25,7 +26,7 @@ import org.springframework.data.redis.core.ZSetOperations;
  * (A timestamp score would tie within one millisecond; the full id does not fit a double's 53 bits.)
  *
  * <p>Lifecycle: a key is created only by {@link #rebuild} (when it is read and missing), lives for the TTL
- * after the last read ({@link #touch}), and writers only add to keys that already exist. Unread keys expire
+ * after the last read ({@link #readPages} refreshes it), and writers only add to keys that already exist. Unread keys expire
  * and stop costing memory and writes.
  */
 public abstract class SortedIdCache {
@@ -104,15 +105,6 @@ public abstract class SortedIdCache {
     }
 
     /**
-     * Marks the list as just read: pushes its expiry one TTL into the future.
-     *
-     * @return false if the key does not exist; one EXPIRE answers both questions
-     */
-    public boolean touch(long ownerId) {
-        return Boolean.TRUE.equals(redis.expire(key(ownerId), ttl));
-    }
-
-    /**
      * Creates the list from ids computed in SQL, with the TTL. An empty list creates nothing
      * (Redis has no empty sorted sets): reads then fall back to SQL until there is something to cache.
      */
@@ -137,24 +129,82 @@ public abstract class SortedIdCache {
         });
     }
 
-    /** Ids older than {@code beforeId}, newest first. */
-    public List<Long> page(long ownerId, long beforeId, int limit) {
+    /** One list to read: which cache, whose list. */
+    public record Source(SortedIdCache cache, long ownerId) {
+    }
+
+    /**
+     * What a read found.
+     *
+     * @param exists false if the key was missing (nothing was read; rebuild it and read again)
+     * @param ids    ids older than the cursor, newest first
+     * @param size   total ids held; equal to the cache's max means older ids were trimmed away
+     */
+    public record SourcePage(Source source, boolean exists, List<Long> ids, long size) {
+
+        public boolean trimmed() {
+            return size >= source.cache().maxEntries();
+        }
+    }
+
+    /**
+     * Reads a page from many lists, possibly of different caches, in <b>one</b> pipelined round trip:
+     * per list EXPIRE (refresh the sliding TTL and learn whether it exists), ZREVRANGEBYLEX (the page) and ZCARD.
+     * All caches must use the same Redis.
+     */
+    public static List<SourcePage> readPages(List<Source> sources, long beforeId, int limit) {
+        if (sources.isEmpty()) {
+            return List.of();
+        }
         Range<String> range = beforeId == Long.MAX_VALUE
                 ? Range.unbounded()
                 : Range.leftUnbounded(Range.Bound.exclusive(member(beforeId)));
-        Set<String> members = redis.opsForZSet()
-                .reverseRangeByLex(key(ownerId), range, Limit.limit().count(limit));
-        return members == null ? List.of() : members.stream().map(Long::parseLong).toList();
-    }
+        // Through methods, not fields: the caches are Spring beans behind CGLIB proxies, whose own fields are null.
+        StringRedisTemplate redis = sources.getFirst().cache().template();
 
-    /** Number of ids held; equal to {@link #maxEntries()} means older ids were trimmed away. */
-    public long size(long ownerId) {
-        Long size = redis.opsForZSet().zCard(key(ownerId));
-        return size == null ? 0 : size;
+        List<Object> replies = redis.executePipelined(new SessionCallback<Object>() {
+            @Override
+            @SuppressWarnings("unchecked")
+            public <K, V> Object execute(RedisOperations<K, V> operations) {
+                var ops = (RedisOperations<String, String>) operations;
+                for (Source source : sources) {
+                    String key = source.cache().keyOf(source.ownerId());
+                    ops.expire(key, source.cache().ttl());
+                    ops.opsForZSet().reverseRangeByLex(key, range, Limit.limit().count(limit));
+                    ops.opsForZSet().zCard(key);
+                }
+                return null;
+            }
+        });
+
+        List<SourcePage> pages = new ArrayList<>(sources.size());
+        for (int i = 0; i < sources.size(); i++) {
+            boolean exists = Boolean.TRUE.equals(replies.get(3 * i));
+            @SuppressWarnings("unchecked")
+            Set<String> members = (Set<String>) replies.get(3 * i + 1);
+            Long size = (Long) replies.get(3 * i + 2);
+            List<Long> ids = members == null ? List.of() : members.stream().map(Long::parseLong).toList();
+            pages.add(new SourcePage(sources.get(i), exists, ids, size == null ? 0 : size));
+        }
+        return pages;
     }
 
     private String key(long ownerId) {
         return keyPrefix + ownerId;
+    }
+
+    // Non-private so that, called on a Spring proxy, they run on the real object (see readPages).
+
+    String keyOf(long ownerId) {
+        return key(ownerId);
+    }
+
+    Duration ttl() {
+        return ttl;
+    }
+
+    StringRedisTemplate template() {
+        return redis;
     }
 
     static String member(long id) {
