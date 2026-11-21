@@ -4,10 +4,12 @@ import az.twitter.config.KafkaConfig;
 import az.twitter.entity.OutboxEventEntity;
 import az.twitter.repository.OutboxRepository;
 
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 
+import org.apache.kafka.clients.producer.ProducerRecord;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.kafka.core.KafkaTemplate;
@@ -41,9 +43,10 @@ public class OutboxPublisher {
         for (OutboxEventEntity event : batch) {
             try {
                 // Wait for the broker ack: only then is it safe to mark the row PUBLISHED.
-                kafka.send(KafkaConfig.topicFor(event.getEventType()), String.valueOf(event.getUserId()),
-                                event.getPayload())
-                        .get(SEND_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+                var record = new ProducerRecord<>(KafkaConfig.topicFor(event.getEventType()),
+                        String.valueOf(event.getUserId()), event.getPayload());
+                record.headers().add(KafkaConfig.EVENT_TYPE_HEADER, event.getEventType().getBytes(StandardCharsets.UTF_8));
+                kafka.send(record).get(SEND_TIMEOUT_SECONDS, TimeUnit.SECONDS);
                 event.markPublished(Instant.now());
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
