@@ -47,6 +47,15 @@ public abstract class SortedIdCache {
             return 1
             """.getBytes(StandardCharsets.UTF_8);
 
+    /**
+     * Placeholder member (id 0, sorts before every real id) that keeps a list's key existing when it has no ids,
+     * so "nothing to show" is cached like anything else. Excluded from reads and counts. When a full list is
+     * trimmed it is the first member to go, which is fine: the list is no longer empty then.
+     */
+    private static final String SENTINEL = member(0);
+    private static final Range.Bound<String> ABOVE_SENTINEL = Range.Bound.exclusive(SENTINEL);
+    private static final Range<String> ALL_IDS = Range.of(ABOVE_SENTINEL, Range.Bound.unbounded());
+
     private final StringRedisTemplate redis;
     private final String keyPrefix;
     private final int maxEntries;
@@ -96,6 +105,17 @@ public abstract class SortedIdCache {
                 connection.scriptingCommands().eval(ADD_IF_EXISTS, ReturnType.INTEGER, 1, keysAndArgs));
     }
 
+    /** Removes one id from each owner's list, in one pipelined round trip (one ZREM per key). Idempotent. */
+    public void removeFromEach(Collection<Long> ownerIds, long id) {
+        byte[] member = bytes(member(id));
+        redis.executePipelined((RedisCallback<Object>) connection -> {
+            for (Long ownerId : ownerIds) {
+                connection.zSetCommands().zRem(bytes(key(ownerId)), member);
+            }
+            return null;
+        });
+    }
+
     /** ZREM; ids not in the list are ignored (idempotent). */
     public void removeAll(long ownerId, Collection<Long> ids) {
         if (ids.isEmpty()) {
@@ -105,15 +125,14 @@ public abstract class SortedIdCache {
     }
 
     /**
-     * Creates the list from ids computed in SQL, with the TTL. An empty list creates nothing
-     * (Redis has no empty sorted sets): reads then fall back to SQL until there is something to cache.
+     * Creates the list from ids computed in SQL, with the TTL. Always with the {@link #SENTINEL}: Redis has no empty
+     * sorted sets, so without it an empty result would create nothing, and every read would find the key missing
+     * and query SQL again (e.g. a new user who follows nobody, on every refresh).
      */
     public void rebuild(long ownerId, List<Long> ids) {
-        if (ids.isEmpty()) {
-            return;
-        }
         String key = key(ownerId);
         Set<ZSetOperations.TypedTuple<String>> members = new HashSet<>();
+        members.add(ZSetOperations.TypedTuple.of(SENTINEL, 0d));
         for (Long id : ids) {
             members.add(ZSetOperations.TypedTuple.of(member(id), 0d));
         }
@@ -153,7 +172,8 @@ public abstract class SortedIdCache {
 
     /**
      * Reads many pages, possibly from different caches, in <b>one</b> pipelined round trip:
-     * per list EXPIRE (refresh the sliding TTL and learn whether it exists), ZREVRANGEBYLEX (the page) and ZCARD.
+     * per list EXPIRE (refresh the sliding TTL and learn whether it exists), ZREVRANGEBYLEX (the page) and
+     * ZLEXCOUNT (how many real ids, i.e. without the sentinel).
      * All caches must use the same Redis.
      */
     public static List<SourcePage> readPages(List<Read> reads) {
@@ -171,12 +191,13 @@ public abstract class SortedIdCache {
                 for (Read read : reads) {
                     Source source = read.source();
                     String key = source.cache().keyOf(source.ownerId());
+                    // Both ranges exclude the sentinel, so it is never returned or counted.
                     Range<String> range = read.beforeId() == Long.MAX_VALUE
-                            ? Range.unbounded()
-                            : Range.leftUnbounded(Range.Bound.exclusive(member(read.beforeId())));
+                            ? ALL_IDS
+                            : Range.of(ABOVE_SENTINEL, Range.Bound.exclusive(member(read.beforeId())));
                     ops.expire(key, source.cache().ttl());
                     ops.opsForZSet().reverseRangeByLex(key, range, Limit.limit().count(read.limit()));
-                    ops.opsForZSet().zCard(key);
+                    ops.opsForZSet().lexCount(key, ALL_IDS);
                 }
                 return null;
             }

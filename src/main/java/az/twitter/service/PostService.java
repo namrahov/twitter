@@ -1,7 +1,10 @@
 package az.twitter.service;
 
+import az.twitter.dto.cache.CacheInvalidation.LocalCache;
 import az.twitter.dto.cache.CachedPost;
 import az.twitter.dto.event.TweetCreatedEvent;
+import az.twitter.dto.event.TweetDeletedEvent;
+import az.twitter.dto.event.TweetEditedEvent;
 import az.twitter.dto.response.CursorPage;
 import az.twitter.dto.response.PostResponse;
 import az.twitter.entity.PostEntity;
@@ -44,18 +47,21 @@ public class PostService {
     private final AsyncCache<Long, CachedPost> localCache;
     private final RebuildLockRepository locks;
     private final RedisGuard redis;
+    private final CacheInvalidationService invalidation;
     private final OutboxService outbox;
     private final UserService users;
     private final SnowflakeIdGenerator ids;
 
     public PostService(PostRepository posts, PostContentCacheRepository contentCache,
                        AsyncCache<Long, CachedPost> tweetLocalCache, RebuildLockRepository locks, RedisGuard redis,
-                       OutboxService outbox, UserService users, SnowflakeIdGenerator ids) {
+                       CacheInvalidationService invalidation, OutboxService outbox, UserService users,
+                       SnowflakeIdGenerator ids) {
         this.posts = posts;
         this.contentCache = contentCache;
         this.localCache = tweetLocalCache;
         this.locks = locks;
         this.redis = redis;
+        this.invalidation = invalidation;
         this.outbox = outbox;
         this.users = users;
         this.ids = ids;
@@ -91,6 +97,61 @@ public class PostService {
         return post;
     }
 
+    /**
+     * Author only. The row and a TweetEdited event commit together; then every cached copy is dropped, so the next
+     * read loads the new text. Twice on purpose:
+     * <ul>
+     *   <li>right after commit (best effort), so the new text shows at once;</li>
+     *   <li>again by the worker handling TweetEdited (FanoutWorker), retried until it succeeds. This also fixes the
+     *       cache-aside race where a reader loaded the old row just before our commit and put it into Redis just
+     *       after our first removal ("delayed double delete").</li>
+     * </ul>
+     */
+    @Transactional
+    public PostEntity edit(long userId, long postId, String content) {
+        PostEntity post = requireOwnPost(userId, postId);
+        post.edit(content, Instant.now());
+        var event = new TweetEditedEvent(UUID.randomUUID(), postId, userId, post.getEditedAt());
+        outbox.append(event.eventId(), TweetEditedEvent.TYPE, postId, userId, event);
+        evictAfterCommit(postId);
+        return post;
+    }
+
+    /**
+     * Author only. The row is deleted and a TweetDeleted event queued; the content caches are cleared as in
+     * {@link #edit}, and the worker also removes the id from the timelines and the celebrity posts list.
+     * Until then, timeline reads drop the id themselves (it has no content any more).
+     */
+    @Transactional
+    public void delete(long userId, long postId) {
+        PostEntity post = requireOwnPost(userId, postId);
+        posts.delete(post);
+        var event = new TweetDeletedEvent(UUID.randomUUID(), postId, userId, Instant.now());
+        outbox.append(event.eventId(), TweetDeletedEvent.TYPE, postId, userId, event);
+        evictAfterCommit(postId);
+    }
+
+    private PostEntity requireOwnPost(long userId, long postId) {
+        PostEntity post = posts.findById(postId)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Post not found"));
+        if (post.getUserId() != userId) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Only the author can change this post");
+        }
+        return post;
+    }
+
+    /** Drops the tweet from this instance's L1, from Redis, and (via Pub/Sub) from every other instance's L1. */
+    private void evictAfterCommit(long postId) {
+        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+            @Override
+            public void afterCommit() {
+                localCache.synchronous().invalidate(postId);
+                redis.runQuietly(() -> contentCache.delete(postId));
+                redis.runQuietly(() -> invalidation.publish(LocalCache.TWEET, postId));
+            }
+        });
+    }
+
     public CachedPost get(long id) {
         List<CachedPost> found = getMany(List.of(id));
         if (found.isEmpty()) {
@@ -111,9 +172,11 @@ public class PostService {
         if (ids.isEmpty()) {
             return List.of();
         }
-        Map<Long, CachedPost> byId = localCache
-                .getAll(ids, (missing, executor) -> CompletableFuture.completedFuture(loadFromRedisOrDb(missing)))
-                .join();
+        // While edit/delete invalidations may be getting lost, L1 copies could be stale: skip L1 then.
+        Map<Long, CachedPost> byId = invalidation.isLocalCacheTrusted()
+                ? localCache.getAll(ids, (missing, executor) ->
+                        CompletableFuture.completedFuture(loadFromRedisOrDb(missing))).join()
+                : loadFromRedisOrDb(Set.copyOf(ids));
 
         List<CachedPost> result = new ArrayList<>(ids.size());
         for (Long id : ids) {

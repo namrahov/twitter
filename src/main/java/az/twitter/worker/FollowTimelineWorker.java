@@ -5,6 +5,7 @@ import az.twitter.dto.event.UserFollowedEvent;
 import az.twitter.dto.event.UserUnfollowedEvent;
 import az.twitter.entity.FollowId;
 import az.twitter.repository.FollowRepository;
+import az.twitter.repository.FollowingCacheRepository;
 import az.twitter.repository.PostRepository;
 import az.twitter.repository.TimelineCacheRepository;
 import az.twitter.repository.UserRepository;
@@ -20,8 +21,13 @@ import org.springframework.stereotype.Component;
 import tools.jackson.databind.json.JsonMapper;
 
 /**
- * Keeps a follower's Redis timeline in line with follow changes:
- * follow → backfill the followee's recent tweets, unfollow → remove the followee's tweets.
+ * Keeps a follower's Redis timeline and following set in line with follow changes:
+ * follow → add to the following set, backfill the followee's recent tweets;
+ * unfollow → remove from the following set, remove the followee's tweets.
+ *
+ * <p>Fan-out vs unfollow race: a fan-out that read the follower list just before the unfollow can still write the
+ * followee's tweet into the timeline after this cleanup. That tweet stays in Redis, but timeline reads drop tweets
+ * whose author is not in the following set (TimelineService), so it is never shown.
  *
  * <p>Both event types come through one topic keyed by follower, so for a given follower they are handled
  * strictly in the order they happened. Every step is idempotent (ZADD/ZREM), so redelivery is harmless.
@@ -38,14 +44,17 @@ public class FollowTimelineWorker {
     private final UserRepository users;
     private final PostRepository posts;
     private final TimelineCacheRepository timelines;
+    private final FollowingCacheRepository following;
     private final JsonMapper json;
 
     public FollowTimelineWorker(FollowRepository follows, UserRepository users, PostRepository posts,
-                                TimelineCacheRepository timelines, JsonMapper json) {
+                                TimelineCacheRepository timelines, FollowingCacheRepository following,
+                                JsonMapper json) {
         this.follows = follows;
         this.users = users;
         this.posts = posts;
         this.timelines = timelines;
+        this.following = following;
         this.json = json;
     }
 
@@ -63,7 +72,8 @@ public class FollowTimelineWorker {
         if (!isFollowing(event.followerId(), event.followeeId())) {
             return;
         }
-        // Celebrity tweets are pulled at read time (from the follows table), nothing to push.
+        following.addIfExists(event.followerId(), event.followeeId());
+        // Celebrity tweets are pulled at read time (via the following set), nothing to push.
         if (users.isCelebrity(event.followeeId())) {
             return;
         }
@@ -82,6 +92,8 @@ public class FollowTimelineWorker {
         if (isFollowing(event.followerId(), event.followeeId())) {
             return;
         }
+        // First: from now on reads drop this followee's tweets, even ones a late fan-out still writes (see below).
+        following.remove(event.followerId(), event.followeeId());
         List<Long> tweetIds = posts.findLatestIds(event.followeeId(), Limit.of(TimelineCacheRepository.MAX_ENTRIES));
         // Also for celebrities: tweets pushed before they became one may still be in the timeline.
         timelines.removeAll(event.followerId(), tweetIds);

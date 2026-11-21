@@ -9,11 +9,21 @@
     { "key": "baseUrl2", "value": "http://localhost:8081" },
     { "key": "aliId", "value": "117404340594933760" },
     { "key": "veliId", "value": "117404341194719232" },
-    { "key": "nigarId", "value": "117404341446377472" }
+    { "key": "nigarId", "value": "117404341446377472" },
+    { "key": "postId", "value": "" }
   ],
   "item": [
     {
       "name": "1. Ali posts a tweet",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [ "// Remember the new tweet's id for the edit and delete requests (8, 9).", "pm.collectionVariables.set('postId', pm.response.json().id);" ]
+          }
+        }
+      ],
       "request": {
         "method": "POST",
         "header": [
@@ -68,6 +78,28 @@
         "method": "GET",
         "description": "Same for a second instance (start it with SERVER_PORT=8081). Each instance has its own L1, so the two can differ.",
         "url": "{{baseUrl2}}/admin/cache/l1?limit=50"
+      }
+    },
+    {
+      "name": "8. Ali edits his tweet",
+      "request": {
+        "method": "PUT",
+        "description": "Edits the tweet created by request 1 ({{postId}}). Only the author may; others get 403. Read a timeline (2) afterwards: new text, editedAt set.",
+        "header": [
+          { "key": "X-User-Id", "value": "{{aliId}}" },
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "body": { "mode": "raw", "raw": "{\n  \"content\": \"Salam, bu tweet redaktə olundu!\"\n}" },
+        "url": "{{baseUrl}}/posts/{{postId}}"
+      }
+    },
+    {
+      "name": "9. Ali deletes his tweet",
+      "request": {
+        "method": "DELETE",
+        "description": "Deletes the tweet created by request 1 ({{postId}}): 204. It disappears from Veli's and Nigar's timelines.",
+        "header": [ { "key": "X-User-Id", "value": "{{aliId}}" } ],
+        "url": "{{baseUrl}}/posts/{{postId}}"
       }
     }
   ]
