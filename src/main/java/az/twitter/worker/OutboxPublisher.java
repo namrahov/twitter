@@ -41,7 +41,8 @@ public class OutboxPublisher {
         for (OutboxEventEntity event : batch) {
             try {
                 // Wait for the broker ack: only then is it safe to mark the row PUBLISHED.
-                kafka.send(KafkaConfig.TWEET_CREATED_TOPIC, String.valueOf(event.getUserId()), event.getPayload())
+                kafka.send(KafkaConfig.topicFor(event.getEventType()), String.valueOf(event.getUserId()),
+                                event.getPayload())
                         .get(SEND_TIMEOUT_SECONDS, TimeUnit.SECONDS);
                 event.markPublished(Instant.now());
             } catch (InterruptedException e) {
@@ -51,7 +52,7 @@ public class OutboxPublisher {
                 event.recordFailedAttempt();
                 log.warn("Outbox event {} not published (attempt {}): {}",
                         event.getId(), event.getAttempts(), e.getMessage());
-                // Stop the batch: Kafka is likely down, and skipping ahead would reorder an author's events.
+                // Stop the batch: Kafka is likely down, and skipping ahead would reorder a user's events.
                 return;
             }
         }

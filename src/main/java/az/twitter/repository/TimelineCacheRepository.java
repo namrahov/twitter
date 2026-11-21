@@ -53,6 +53,14 @@ public class TimelineCacheRepository {
         });
     }
 
+    /** ZREM: removes the given tweets from one user's timeline; ids not in it are ignored (idempotent). */
+    public void removeFromTimeline(long userId, Collection<Long> tweetIds) {
+        if (tweetIds.isEmpty()) {
+            return;
+        }
+        redis.opsForZSet().remove(key(userId), tweetIds.stream().map(TimelineCacheRepository::member).toArray());
+    }
+
     /** Tweet ids older than {@code beforeId}, newest first. */
     public List<Long> page(long userId, long beforeId, int limit) {
         Range<String> range = beforeId == Long.MAX_VALUE

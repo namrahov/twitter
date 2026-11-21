@@ -3,9 +3,7 @@ package az.twitter.service;
 import az.twitter.dto.event.TweetCreatedEvent;
 import az.twitter.dto.response.CursorPage;
 import az.twitter.dto.response.PostResponse;
-import az.twitter.entity.OutboxEventEntity;
 import az.twitter.entity.PostEntity;
-import az.twitter.repository.OutboxRepository;
 import az.twitter.repository.PostRepository;
 import az.twitter.util.SnowflakeIdGenerator;
 
@@ -18,24 +16,20 @@ import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
-import tools.jackson.databind.json.JsonMapper;
 
 @Service
 public class PostService {
 
     private final PostRepository posts;
-    private final OutboxRepository outbox;
+    private final OutboxService outbox;
     private final UserService users;
     private final SnowflakeIdGenerator ids;
-    private final JsonMapper json;
 
-    public PostService(PostRepository posts, OutboxRepository outbox, UserService users,
-                       SnowflakeIdGenerator ids, JsonMapper json) {
+    public PostService(PostRepository posts, OutboxService outbox, UserService users, SnowflakeIdGenerator ids) {
         this.posts = posts;
         this.outbox = outbox;
         this.users = users;
         this.ids = ids;
-        this.json = json;
     }
 
     /**
@@ -54,8 +48,7 @@ public class PostService {
         }
 
         var event = new TweetCreatedEvent(UUID.randomUUID(), id, authorId, createdAt);
-        outbox.save(new OutboxEventEntity(event.eventId(), id, authorId, TweetCreatedEvent.TYPE,
-                json.writeValueAsString(event)));
+        outbox.append(event.eventId(), TweetCreatedEvent.TYPE, id, authorId, event);
         return post;
     }
 

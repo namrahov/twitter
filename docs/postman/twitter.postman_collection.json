@@ -1,0 +1,57 @@
+{
+  "info": {
+    "name": "Twitter - fan-out demo",
+    "description": "Ali posts; Veli and Nigar follow Ali, so the tweet should appear in their home timelines. User ids are collection variables; change them if you recreate the users.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:8080" },
+    { "key": "aliId", "value": "117404340594933760" },
+    { "key": "veliId", "value": "117404341194719232" },
+    { "key": "nigarId", "value": "117404341446377472" }
+  ],
+  "item": [
+    {
+      "name": "1. Ali posts a tweet",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "X-User-Id", "value": "{{aliId}}" },
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "body": { "mode": "raw", "raw": "{\n  \"content\": \"Salam, bu mənim ilk tweet-imdir!\"\n}" },
+        "url": "{{baseUrl}}/posts"
+      }
+    },
+    {
+      "name": "2. Veli's home timeline",
+      "request": {
+        "method": "GET",
+        "header": [ { "key": "X-User-Id", "value": "{{veliId}}" } ],
+        "url": "{{baseUrl}}/timeline"
+      }
+    },
+    {
+      "name": "3. Nigar's home timeline",
+      "request": {
+        "method": "GET",
+        "header": [ { "key": "X-User-Id", "value": "{{nigarId}}" } ],
+        "url": "{{baseUrl}}/timeline"
+      }
+    },
+    {
+      "name": "4. Ali's followers",
+      "request": {
+        "method": "GET",
+        "url": "{{baseUrl}}/users/{{aliId}}/followers"
+      }
+    },
+    {
+      "name": "5. Ali's profile posts",
+      "request": {
+        "method": "GET",
+        "url": "{{baseUrl}}/users/{{aliId}}/posts"
+      }
+    }
+  ]
+}
