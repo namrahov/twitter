@@ -21,6 +21,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.TreeSet;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
@@ -54,13 +55,15 @@ public class TimelineService {
     private final PostService postService;
     private final AsyncCache<Long, CelebrityPostsSnapshot> celebrityLocalCache;
     private final CelebrityPostsLoader celebrityLoader;
+    private final CacheInvalidationService invalidation;
     private final RedisGuard redis;
     private final Bulkhead sqlFallbackBulkhead;
 
     public TimelineService(TimelineCacheRepository timelines, CelebrityPostsCacheRepository celebrityPosts,
                            FollowRepository follows, PostRepository posts, PostService postService,
                            AsyncCache<Long, CelebrityPostsSnapshot> celebrityPostsLocalCache,
-                           CelebrityPostsLoader celebrityLoader, RedisGuard redis,
+                           CelebrityPostsLoader celebrityLoader, CacheInvalidationService invalidation,
+                           RedisGuard redis,
                            @Value("${twitter.timeline.sql-fallback-max-concurrent}") int sqlFallbackMaxConcurrent) {
         this.timelines = timelines;
         this.celebrityPosts = celebrityPosts;
@@ -69,6 +72,7 @@ public class TimelineService {
         this.postService = postService;
         this.celebrityLocalCache = celebrityPostsLocalCache;
         this.celebrityLoader = celebrityLoader;
+        this.invalidation = invalidation;
         this.redis = redis;
         // maxWaitDuration 0: when all permits are taken, fail immediately instead of queueing web threads.
         this.sqlFallbackBulkhead = Bulkhead.of("timeline-sql-fallback", BulkheadConfig.custom()
@@ -131,11 +135,14 @@ public class TimelineService {
 
         // Pull part: one shared list per followed celebrity, through L1. Lists missing in L1 are loaded together
         // (one Redis pipeline); concurrent requests missing the same celebrity wait for that one load.
+        // While invalidation messages may be getting lost, L1 copies could be stale: read Redis directly then.
         List<Long> celebrityIds = follows.findCelebrityFolloweeIds(userId);
-        Map<Long, CelebrityPostsSnapshot> snapshots = celebrityLocalCache
-                .getAll(celebrityIds, (missing, executor) ->
-                        CompletableFuture.completedFuture(celebrityLoader.load(missing)))
-                .join();
+        Map<Long, CelebrityPostsSnapshot> snapshots = invalidation.isCelebrityCacheTrusted()
+                ? celebrityLocalCache
+                        .getAll(celebrityIds, (missing, executor) ->
+                                CompletableFuture.completedFuture(celebrityLoader.load(missing)))
+                        .join()
+                : celebrityLoader.load(Set.copyOf(celebrityIds));
         snapshots.forEach((celebrityId, snapshot) ->
                 pages.add(snapshot.page(new Source(celebrityPosts, celebrityId), beforeId, wanted)));
 

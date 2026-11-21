@@ -2,6 +2,7 @@ package az.twitter.controller;
 
 import az.twitter.dto.cache.CachedPost;
 import az.twitter.dto.cache.CelebrityPostsSnapshot;
+import az.twitter.service.CacheInvalidationService;
 
 import java.time.Instant;
 import java.util.Comparator;
@@ -28,13 +29,15 @@ public class AdminCacheController {
 
     private final AsyncCache<Long, CachedPost> tweetLocalCache;
     private final AsyncCache<Long, CelebrityPostsSnapshot> celebrityPostsLocalCache;
+    private final CacheInvalidationService invalidation;
     private final String instance;
 
     public AdminCacheController(AsyncCache<Long, CachedPost> tweetLocalCache,
                                 AsyncCache<Long, CelebrityPostsSnapshot> celebrityPostsLocalCache,
-                                @Value("${server.port}") String port) {
+                                CacheInvalidationService invalidation, @Value("${server.port}") String port) {
         this.tweetLocalCache = tweetLocalCache;
         this.celebrityPostsLocalCache = celebrityPostsLocalCache;
+        this.invalidation = invalidation;
         this.instance = "port " + port;
     }
 
@@ -62,6 +65,8 @@ public class AdminCacheController {
 
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("instance", instance);
+        // false while invalidation messages may be lost: timelines then skip the celebrity L1 and read Redis
+        result.put("celebrityCacheTrusted", invalidation.isCelebrityCacheTrusted());
         result.put("tweets", Map.of("size", tweets.size(), "entries", tweetEntries));
         result.put("celebrityPosts", Map.of("size", celebrities.size(), "entries", celebrityEntries));
         return result;
