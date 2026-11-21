@@ -3,6 +3,7 @@ package az.twitter.repository;
 import java.util.Collection;
 import java.util.List;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 import org.springframework.data.domain.Range;
 import org.springframework.data.redis.connection.Limit;
@@ -48,6 +49,30 @@ public class TimelineCacheRepository {
                     zset.add(key, member, 0);
                     zset.removeRange(key, 0, -(MAX_ENTRIES + 1)); // keep the newest MAX_ENTRIES
                 }
+                return null;
+            }
+        });
+    }
+
+    /**
+     * Adds several tweets to one user's timeline (backfill) in one round trip, then trims.
+     * Members sort by id, so older tweets land in their place by time; already present ids are no-ops.
+     */
+    public void addTweetsToTimeline(long userId, Collection<Long> tweetIds) {
+        if (tweetIds.isEmpty()) {
+            return;
+        }
+        String key = key(userId);
+        Set<ZSetOperations.TypedTuple<String>> members = tweetIds.stream()
+                .map(id -> ZSetOperations.TypedTuple.of(member(id), 0d))
+                .collect(Collectors.toSet());
+        redis.executePipelined(new SessionCallback<Object>() {
+            @Override
+            @SuppressWarnings("unchecked")
+            public <K, V> Object execute(RedisOperations<K, V> operations) {
+                ZSetOperations<String, String> zset = ((RedisOperations<String, String>) operations).opsForZSet();
+                zset.add(key, members);
+                zset.removeRange(key, 0, -(MAX_ENTRIES + 1));
                 return null;
             }
         });

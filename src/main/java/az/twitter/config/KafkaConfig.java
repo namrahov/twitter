@@ -1,6 +1,7 @@
 package az.twitter.config;
 
 import az.twitter.dto.event.TweetCreatedEvent;
+import az.twitter.dto.event.UserFollowedEvent;
 import az.twitter.dto.event.UserUnfollowedEvent;
 
 import org.apache.kafka.clients.admin.NewTopic;
@@ -14,13 +15,21 @@ import org.springframework.util.backoff.FixedBackOff;
 public class KafkaConfig {
 
     public static final String TWEET_CREATED_TOPIC = "tweet-created";
-    public static final String USER_UNFOLLOWED_TOPIC = "user-unfollowed";
+
+    /**
+     * Follow and unfollow share one topic, keyed by follower: Kafka keeps order only within a partition,
+     * so with two topics a quick follow → unfollow could be processed as unfollow → follow.
+     */
+    public static final String FOLLOW_EVENTS_TOPIC = "follow-events";
+
+    /** Kafka header carrying the outbox event type, so one listener can tell event kinds apart. */
+    public static final String EVENT_TYPE_HEADER = "event-type";
 
     /** Which topic an outbox row of a given event type goes to. */
     public static String topicFor(String eventType) {
         return switch (eventType) {
             case TweetCreatedEvent.TYPE -> TWEET_CREATED_TOPIC;
-            case UserUnfollowedEvent.TYPE -> USER_UNFOLLOWED_TOPIC;
+            case UserFollowedEvent.TYPE, UserUnfollowedEvent.TYPE -> FOLLOW_EVENTS_TOPIC;
             default -> throw new IllegalArgumentException("No topic for event type " + eventType);
         };
     }
@@ -32,8 +41,8 @@ public class KafkaConfig {
     }
 
     @Bean
-    public NewTopic userUnfollowedTopic() {
-        return TopicBuilder.name(USER_UNFOLLOWED_TOPIC).partitions(3).replicas(1).build();
+    public NewTopic followEventsTopic() {
+        return TopicBuilder.name(FOLLOW_EVENTS_TOPIC).partitions(3).replicas(1).build();
     }
 
     /**

@@ -1,5 +1,6 @@
 package az.twitter.service;
 
+import az.twitter.dto.event.UserFollowedEvent;
 import az.twitter.dto.event.UserUnfollowedEvent;
 import az.twitter.dto.response.CursorPage;
 import az.twitter.dto.response.UserResponse;
@@ -30,16 +31,28 @@ public class FollowService {
         this.outbox = outbox;
     }
 
+    /**
+     * Inserts the follow and, in the same transaction, queues a UserFollowed event; a worker then backfills
+     * the followee's recent tweets into the follower's Redis timeline. Already following → no event.
+     */
+    @Transactional
     public void follow(long followerId, long followeeId) {
         if (followerId == followeeId) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Cannot follow yourself");
         }
+        int inserted;
         try {
             // Single statement, no "does the user exist?" round trip: the FK answers that.
-            follows.insertIfAbsent(followerId, followeeId);
+            inserted = follows.insertIfAbsent(followerId, followeeId);
         } catch (DataIntegrityViolationException e) {
             throw new ResponseStatusException(HttpStatus.NOT_FOUND, "User not found");
         }
+        if (inserted == 0) {
+            return;
+        }
+        var event = new UserFollowedEvent(UUID.randomUUID(), followerId, followeeId, Instant.now());
+        // Key = follower: same key and topic as UserUnfollowed, so the two stay ordered.
+        outbox.append(event.eventId(), UserFollowedEvent.TYPE, followeeId, followerId, event);
     }
 
     /**
