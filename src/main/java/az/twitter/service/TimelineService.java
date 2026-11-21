@@ -15,12 +15,12 @@ import az.twitter.repository.TimelineCacheRepository;
 
 import java.util.ArrayList;
 import java.util.Comparator;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeSet;
+import java.util.concurrent.CompletableFuture;
 
-import com.github.benmanes.caffeine.cache.Cache;
+import com.github.benmanes.caffeine.cache.AsyncCache;
 import org.springframework.data.domain.Limit;
 import org.springframework.stereotype.Service;
 
@@ -41,17 +41,20 @@ public class TimelineService {
     private final FollowRepository follows;
     private final PostRepository posts;
     private final PostService postService;
-    private final Cache<Long, CelebrityPostsSnapshot> celebrityLocalCache;
+    private final AsyncCache<Long, CelebrityPostsSnapshot> celebrityLocalCache;
+    private final CelebrityPostsLoader celebrityLoader;
 
     public TimelineService(TimelineCacheRepository timelines, CelebrityPostsCacheRepository celebrityPosts,
                            FollowRepository follows, PostRepository posts, PostService postService,
-                           Cache<Long, CelebrityPostsSnapshot> celebrityPostsLocalCache) {
+                           AsyncCache<Long, CelebrityPostsSnapshot> celebrityPostsLocalCache,
+                           CelebrityPostsLoader celebrityLoader) {
         this.timelines = timelines;
         this.celebrityPosts = celebrityPosts;
         this.follows = follows;
         this.posts = posts;
         this.postService = postService;
         this.celebrityLocalCache = celebrityPostsLocalCache;
+        this.celebrityLoader = celebrityLoader;
     }
 
     public CursorPage<PostResponse> home(long userId, long beforeId, int limit) {
@@ -63,49 +66,29 @@ public class TimelineService {
         // Ids at or below this are not reliably covered by every cache (one of them was trimmed above it).
         long floor = Long.MIN_VALUE;
 
-        // Sources: the user's own timeline (push part) + one shared list per followed celebrity (pull part).
-        // Celebrity lists found in L1 (this JVM) are paged locally; the rest is read from Redis.
-        Map<Source, SourcePage> pages = new LinkedHashMap<>();
-        List<Read> reads = new ArrayList<>();
-        reads.add(new Read(new Source(timelines, userId), beforeId, wanted));
-        for (long celebrityId : follows.findCelebrityFolloweeIds(userId)) {
-            Source source = new Source(celebrityPosts, celebrityId);
-            CelebrityPostsSnapshot snapshot = celebrityLocalCache.getIfPresent(celebrityId);
-            if (snapshot != null) {
-                pages.put(source, snapshot.page(source, beforeId, wanted));
-            } else {
-                // Whole list, not just this page: the snapshot then serves every page and every user here.
-                reads.add(new Read(source, Long.MAX_VALUE, CelebrityPostsCacheRepository.MAX_ENTRIES));
-            }
+        List<SourcePage> pages = new ArrayList<>();
+
+        // Push part: the user's own timeline. Per-user, so no stampede risk: a missing key (inactive user) is
+        // simply rebuilt from SQL and read again.
+        Read own = new Read(new Source(timelines, userId), beforeId, wanted);
+        SourcePage ownPage = SortedIdCache.readPages(List.of(own)).getFirst();
+        if (!ownPage.exists()) {
+            timelines.rebuild(userId, posts.findPushedTimelineIds(userId, TimelineCacheRepository.MAX_ENTRIES));
+            ownPage = SortedIdCache.readPages(List.of(own)).getFirst();
         }
+        pages.add(ownPage);
 
-        // One Redis round trip for all of them (TTL refresh + page + size per list), however many celebrities.
-        List<SourcePage> fromRedis = new ArrayList<>(SortedIdCache.readPages(reads));
+        // Pull part: one shared list per followed celebrity, through L1. Lists missing in L1 are loaded together
+        // (one Redis pipeline); concurrent requests missing the same celebrity wait for that one load.
+        List<Long> celebrityIds = follows.findCelebrityFolloweeIds(userId);
+        Map<Long, CelebrityPostsSnapshot> snapshots = celebrityLocalCache
+                .getAll(celebrityIds, (missing, executor) ->
+                        CompletableFuture.completedFuture(celebrityLoader.load(missing)))
+                .join();
+        snapshots.forEach((celebrityId, snapshot) ->
+                pages.add(snapshot.page(new Source(celebrityPosts, celebrityId), beforeId, wanted)));
 
-        // Expired lists (inactive user, celebrity nobody read for a day): rebuild from SQL, then read just those
-        // again — a second round trip only when something was missing.
-        List<Read> rereads = new ArrayList<>();
-        for (int i = 0; i < fromRedis.size(); i++) {
-            if (!fromRedis.get(i).exists()) {
-                rebuild(fromRedis.get(i).source());
-                rereads.add(reads.get(i));
-            }
-        }
-        fromRedis.removeIf(p -> !p.exists());
-        fromRedis.addAll(SortedIdCache.readPages(rereads));
-
-        for (SourcePage page : fromRedis) {
-            if (page.source().cache() == celebrityPosts) {
-                // A celebrity without posts is cached as an empty snapshot too: no rebuild query for 2 s.
-                var snapshot = new CelebrityPostsSnapshot(page.ids(), page.size());
-                celebrityLocalCache.put(page.source().ownerId(), snapshot);
-                pages.put(page.source(), snapshot.page(page.source(), beforeId, wanted));
-            } else {
-                pages.put(page.source(), page);
-            }
-        }
-
-        for (SourcePage page : pages.values()) {
+        for (SourcePage page : pages) {
             candidates.addAll(page.ids());
             floor = Math.max(floor, floorOf(page, beforeId, wanted));
         }
@@ -122,16 +105,6 @@ public class TimelineService {
                     .forEach(p -> rows.add(CachedPost.from(p)));
         }
         return CursorPage.of(rows, limit, CachedPost::id, PostResponse::from);
-    }
-
-    private void rebuild(Source source) {
-        if (source.cache() == timelines) {
-            timelines.rebuild(source.ownerId(),
-                    posts.findPushedTimelineIds(source.ownerId(), TimelineCacheRepository.MAX_ENTRIES));
-        } else {
-            celebrityPosts.rebuild(source.ownerId(),
-                    posts.findLatestIds(source.ownerId(), Limit.of(CelebrityPostsCacheRepository.MAX_ENTRIES)));
-        }
     }
 
     /**

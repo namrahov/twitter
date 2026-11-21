@@ -5,7 +5,7 @@ import az.twitter.dto.cache.CelebrityPostsSnapshot;
 
 import java.time.Duration;
 
-import com.github.benmanes.caffeine.cache.Cache;
+import com.github.benmanes.caffeine.cache.AsyncCache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -15,6 +15,10 @@ import org.springframework.context.annotation.Configuration;
  * They take the hot-key load off Redis: with N app instances, a hot key costs Redis about N reads per TTL
  * instead of one read per request. Each instance has its own copy, so data can differ between instances
  * for up to the TTL. Per-user timelines are not here: nobody else reads them, so L1 would not help.
+ *
+ * <p>Async caches on purpose: a key being loaded holds a future, so concurrent requests missing the same key
+ * wait for that one load instead of each loading it again (request coalescing — stampede protection
+ * within one instance; {@code RebuildLockRepository} does the same across instances).
  */
 @Configuration
 public class LocalCacheConfig {
@@ -24,11 +28,11 @@ public class LocalCacheConfig {
      * how long a cold tweet occupies memory (the size limit evicts least used ones earlier).
      */
     @Bean
-    public Cache<Long, CachedPost> tweetLocalCache() {
+    public AsyncCache<Long, CachedPost> tweetLocalCache() {
         return Caffeine.newBuilder()
                 .maximumSize(100_000)
                 .expireAfterWrite(Duration.ofMinutes(10))
-                .build();
+                .buildAsync();
     }
 
     /**
@@ -36,10 +40,10 @@ public class LocalCacheConfig {
      * (within the 5 s freshness goal), while a celebrity read by millions costs Redis one read per 2 s per instance.
      */
     @Bean
-    public Cache<Long, CelebrityPostsSnapshot> celebrityPostsLocalCache() {
+    public AsyncCache<Long, CelebrityPostsSnapshot> celebrityPostsLocalCache() {
         return Caffeine.newBuilder()
                 .maximumSize(10_000)
                 .expireAfterWrite(Duration.ofSeconds(2))
-                .build();
+                .buildAsync();
     }
 }
