@@ -8,6 +8,7 @@ import az.twitter.repository.SortedIdCache;
 import az.twitter.repository.SortedIdCache.Read;
 import az.twitter.repository.SortedIdCache.Source;
 import az.twitter.repository.SortedIdCache.SourcePage;
+import az.twitter.util.RedisGuard;
 
 import java.util.ArrayList;
 import java.util.Collection;
@@ -35,12 +36,14 @@ public class CelebrityPostsLoader {
     private final CelebrityPostsCacheRepository celebrityPosts;
     private final PostRepository posts;
     private final RebuildLockRepository locks;
+    private final RedisGuard redis;
 
     public CelebrityPostsLoader(CelebrityPostsCacheRepository celebrityPosts, PostRepository posts,
-                                RebuildLockRepository locks) {
+                                RebuildLockRepository locks, RedisGuard redis) {
         this.celebrityPosts = celebrityPosts;
         this.posts = posts;
         this.locks = locks;
+        this.redis = redis;
     }
 
     /**
@@ -53,7 +56,7 @@ public class CelebrityPostsLoader {
 
         List<Long> waiting = new ArrayList<>();
         for (Long celebrityId : missing) {
-            Optional<String> token = locks.tryAcquire(lockName(celebrityId));
+            Optional<String> token = redis.call(() -> locks.tryAcquire(lockName(celebrityId)));
             if (token.isEmpty()) {
                 waiting.add(celebrityId);
                 continue;
@@ -64,10 +67,10 @@ public class CelebrityPostsLoader {
                     continue;
                 }
                 List<Long> ids = posts.findLatestIds(celebrityId, Limit.of(CelebrityPostsCacheRepository.MAX_ENTRIES));
-                celebrityPosts.rebuild(celebrityId, ids);
+                redis.run(() -> celebrityPosts.rebuild(celebrityId, ids));
                 result.put(celebrityId, new CelebrityPostsSnapshot(ids, ids.size()));
             } finally {
-                locks.release(lockName(celebrityId), token.get());
+                redis.runQuietly(() -> locks.release(lockName(celebrityId), token.get()));
             }
         }
 
@@ -88,7 +91,7 @@ public class CelebrityPostsLoader {
                         CelebrityPostsCacheRepository.MAX_ENTRIES))
                 .toList();
         List<Long> missing = new ArrayList<>();
-        for (SourcePage page : SortedIdCache.readPages(reads)) {
+        for (SourcePage page : redis.call(() -> SortedIdCache.readPages(reads))) {
             long celebrityId = page.source().ownerId();
             if (page.exists()) {
                 result.put(celebrityId, new CelebrityPostsSnapshot(page.ids(), page.size()));

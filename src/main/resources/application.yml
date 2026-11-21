@@ -22,6 +22,20 @@ spring:
     redis:
       host: ${REDIS_HOST:localhost}
       port: ${REDIS_PORT:6380}
+      # Redis answers in well under a millisecond. Without these, a dead Redis makes every request wait the
+      # Lettuce default (60 s) and holds a web thread meanwhile: the thread pool fills up and the whole app stops.
+      timeout: 200ms
+      connect-timeout: 200ms
+      lettuce:
+        # Pipelines (timeline reads, fan-out) need a dedicated connection. Without a pool, Lettuce opens a new TCP
+        # connection for every pipeline; under a burst of requests those connects time out and trip the breaker
+        # even though Redis is healthy. Pooled connections are opened once and reused.
+        pool:
+          enabled: true
+          max-active: 64
+          max-idle: 64
+          min-idle: 8
+          max-wait: 200ms
   kafka:
     bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
     producer:
@@ -43,6 +57,9 @@ twitter:
     # Accounts with at least this many followers become "celebrities": their tweets are not pushed into
     # followers' timelines (fan-out on write) but pulled when a follower reads (fan-out on read).
     celebrity-threshold: ${CELEBRITY_THRESHOLD:10000}
+    # While Redis is down, timelines are built with SQL; at most this many such queries run at once
+    # (bulkhead). Requests beyond that get 503 immediately instead of piling onto PostgreSQL.
+    sql-fallback-max-concurrent: ${TIMELINE_SQL_FALLBACK_MAX_CONCURRENT:20}
 
 management:
   endpoints:
