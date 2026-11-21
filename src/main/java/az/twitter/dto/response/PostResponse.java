@@ -1,5 +1,6 @@
 package az.twitter.dto.response;
 
+import az.twitter.dto.cache.CachedPost;
 import az.twitter.entity.PostEntity;
 
 import java.time.Instant;
@@ -10,5 +11,10 @@ public record PostResponse(String id, String authorId, String content, Instant c
     public static PostResponse from(PostEntity post) {
         return new PostResponse(String.valueOf(post.getId()), String.valueOf(post.getUserId()),
                 post.getContent(), post.getCreatedAt());
+    }
+
+    public static PostResponse from(CachedPost post) {
+        return new PostResponse(String.valueOf(post.id()), String.valueOf(post.userId()),
+                post.content(), post.createdAt());
     }
 }
