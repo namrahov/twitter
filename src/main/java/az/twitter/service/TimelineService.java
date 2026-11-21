@@ -4,6 +4,8 @@ import az.twitter.dto.cache.CachedPost;
 import az.twitter.dto.cache.CelebrityPostsSnapshot;
 import az.twitter.dto.response.CursorPage;
 import az.twitter.dto.response.PostResponse;
+import az.twitter.entity.PostEntity;
+import az.twitter.exception.CacheUnavailableException;
 import az.twitter.repository.CelebrityPostsCacheRepository;
 import az.twitter.repository.FollowRepository;
 import az.twitter.repository.PostRepository;
@@ -12,17 +14,26 @@ import az.twitter.repository.SortedIdCache.Read;
 import az.twitter.repository.SortedIdCache.Source;
 import az.twitter.repository.SortedIdCache.SourcePage;
 import az.twitter.repository.TimelineCacheRepository;
+import az.twitter.util.RedisGuard;
 
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeSet;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 
 import com.github.benmanes.caffeine.cache.AsyncCache;
+import io.github.resilience4j.bulkhead.Bulkhead;
+import io.github.resilience4j.bulkhead.BulkheadConfig;
+import io.github.resilience4j.bulkhead.BulkheadFullException;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.domain.Limit;
+import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
+import org.springframework.web.server.ResponseStatusException;
 
 /**
  * Home timeline = hybrid fan-out, merged at read time:
@@ -43,11 +54,14 @@ public class TimelineService {
     private final PostService postService;
     private final AsyncCache<Long, CelebrityPostsSnapshot> celebrityLocalCache;
     private final CelebrityPostsLoader celebrityLoader;
+    private final RedisGuard redis;
+    private final Bulkhead sqlFallbackBulkhead;
 
     public TimelineService(TimelineCacheRepository timelines, CelebrityPostsCacheRepository celebrityPosts,
                            FollowRepository follows, PostRepository posts, PostService postService,
                            AsyncCache<Long, CelebrityPostsSnapshot> celebrityPostsLocalCache,
-                           CelebrityPostsLoader celebrityLoader) {
+                           CelebrityPostsLoader celebrityLoader, RedisGuard redis,
+                           @Value("${twitter.timeline.sql-fallback-max-concurrent}") int sqlFallbackMaxConcurrent) {
         this.timelines = timelines;
         this.celebrityPosts = celebrityPosts;
         this.follows = follows;
@@ -55,9 +69,45 @@ public class TimelineService {
         this.postService = postService;
         this.celebrityLocalCache = celebrityPostsLocalCache;
         this.celebrityLoader = celebrityLoader;
+        this.redis = redis;
+        // maxWaitDuration 0: when all permits are taken, fail immediately instead of queueing web threads.
+        this.sqlFallbackBulkhead = Bulkhead.of("timeline-sql-fallback", BulkheadConfig.custom()
+                .maxConcurrentCalls(sqlFallbackMaxConcurrent)
+                .maxWaitDuration(Duration.ZERO)
+                .build());
     }
 
+    /**
+     * Normally built from the caches. If Redis fails (or its circuit breaker is open), the page is built with
+     * SQL instead — but only {@code sql-fallback-max-concurrent} at a time, so a Redis outage cannot turn into
+     * a PostgreSQL outage; the rest get 503 at once.
+     */
     public CursorPage<PostResponse> home(long userId, long beforeId, int limit) {
+        try {
+            return fromCaches(userId, beforeId, limit);
+        } catch (CacheUnavailableException e) {
+            return fromSqlFallback(userId, beforeId, limit);
+        } catch (CompletionException e) { // thrown through the L1 async cache
+            if (e.getCause() instanceof CacheUnavailableException) {
+                return fromSqlFallback(userId, beforeId, limit);
+            }
+            throw e;
+        }
+    }
+
+    private CursorPage<PostResponse> fromSqlFallback(long userId, long beforeId, int limit) {
+        try {
+            return sqlFallbackBulkhead.executeSupplier(() -> {
+                var rows = posts.findHomeTimeline(userId, beforeId, Limit.of(limit + 1));
+                return CursorPage.of(rows, limit, PostEntity::getId, PostResponse::from);
+            });
+        } catch (BulkheadFullException e) {
+            throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE,
+                    "Timeline temporarily unavailable, please retry");
+        }
+    }
+
+    private CursorPage<PostResponse> fromCaches(long userId, long beforeId, int limit) {
         int wanted = limit + 1; // one extra row tells us whether a next page exists
 
         // Ids from all cache sources, newest first, deduplicated (a tweet pushed before its author became a
@@ -71,10 +121,11 @@ public class TimelineService {
         // Push part: the user's own timeline. Per-user, so no stampede risk: a missing key (inactive user) is
         // simply rebuilt from SQL and read again.
         Read own = new Read(new Source(timelines, userId), beforeId, wanted);
-        SourcePage ownPage = SortedIdCache.readPages(List.of(own)).getFirst();
+        SourcePage ownPage = redis.call(() -> SortedIdCache.readPages(List.of(own)).getFirst());
         if (!ownPage.exists()) {
-            timelines.rebuild(userId, posts.findPushedTimelineIds(userId, TimelineCacheRepository.MAX_ENTRIES));
-            ownPage = SortedIdCache.readPages(List.of(own)).getFirst();
+            List<Long> pushedIds = posts.findPushedTimelineIds(userId, TimelineCacheRepository.MAX_ENTRIES);
+            redis.run(() -> timelines.rebuild(userId, pushedIds));
+            ownPage = redis.call(() -> SortedIdCache.readPages(List.of(own)).getFirst());
         }
         pages.add(ownPage);
 
