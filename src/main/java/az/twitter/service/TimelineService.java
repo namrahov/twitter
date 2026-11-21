@@ -1,12 +1,14 @@
 package az.twitter.service;
 
 import az.twitter.dto.cache.CachedPost;
+import az.twitter.dto.cache.CelebrityPostsSnapshot;
 import az.twitter.dto.response.CursorPage;
 import az.twitter.dto.response.PostResponse;
 import az.twitter.repository.CelebrityPostsCacheRepository;
 import az.twitter.repository.FollowRepository;
 import az.twitter.repository.PostRepository;
 import az.twitter.repository.SortedIdCache;
+import az.twitter.repository.SortedIdCache.Read;
 import az.twitter.repository.SortedIdCache.Source;
 import az.twitter.repository.SortedIdCache.SourcePage;
 import az.twitter.repository.TimelineCacheRepository;
@@ -18,6 +20,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.TreeSet;
 
+import com.github.benmanes.caffeine.cache.Cache;
 import org.springframework.data.domain.Limit;
 import org.springframework.stereotype.Service;
 
@@ -38,14 +41,17 @@ public class TimelineService {
     private final FollowRepository follows;
     private final PostRepository posts;
     private final PostService postService;
+    private final Cache<Long, CelebrityPostsSnapshot> celebrityLocalCache;
 
     public TimelineService(TimelineCacheRepository timelines, CelebrityPostsCacheRepository celebrityPosts,
-                           FollowRepository follows, PostRepository posts, PostService postService) {
+                           FollowRepository follows, PostRepository posts, PostService postService,
+                           Cache<Long, CelebrityPostsSnapshot> celebrityPostsLocalCache) {
         this.timelines = timelines;
         this.celebrityPosts = celebrityPosts;
         this.follows = follows;
         this.posts = posts;
         this.postService = postService;
+        this.celebrityLocalCache = celebrityPostsLocalCache;
     }
 
     public CursorPage<PostResponse> home(long userId, long beforeId, int limit) {
@@ -58,26 +64,46 @@ public class TimelineService {
         long floor = Long.MIN_VALUE;
 
         // Sources: the user's own timeline (push part) + one shared list per followed celebrity (pull part).
-        List<Source> sources = new ArrayList<>();
-        sources.add(new Source(timelines, userId));
+        // Celebrity lists found in L1 (this JVM) are paged locally; the rest is read from Redis.
+        Map<Source, SourcePage> pages = new LinkedHashMap<>();
+        List<Read> reads = new ArrayList<>();
+        reads.add(new Read(new Source(timelines, userId), beforeId, wanted));
         for (long celebrityId : follows.findCelebrityFolloweeIds(userId)) {
-            sources.add(new Source(celebrityPosts, celebrityId));
+            Source source = new Source(celebrityPosts, celebrityId);
+            CelebrityPostsSnapshot snapshot = celebrityLocalCache.getIfPresent(celebrityId);
+            if (snapshot != null) {
+                pages.put(source, snapshot.page(source, beforeId, wanted));
+            } else {
+                // Whole list, not just this page: the snapshot then serves every page and every user here.
+                reads.add(new Read(source, Long.MAX_VALUE, CelebrityPostsCacheRepository.MAX_ENTRIES));
+            }
         }
 
         // One Redis round trip for all of them (TTL refresh + page + size per list), however many celebrities.
-        Map<Source, SourcePage> pages = new LinkedHashMap<>();
-        SortedIdCache.readPages(sources, beforeId, wanted).forEach(p -> pages.put(p.source(), p));
+        List<SourcePage> fromRedis = new ArrayList<>(SortedIdCache.readPages(reads));
 
         // Expired lists (inactive user, celebrity nobody read for a day): rebuild from SQL, then read just those
         // again — a second round trip only when something was missing.
-        List<Source> rebuilt = new ArrayList<>();
-        for (SourcePage page : pages.values()) {
-            if (!page.exists()) {
-                rebuild(page.source());
-                rebuilt.add(page.source());
+        List<Read> rereads = new ArrayList<>();
+        for (int i = 0; i < fromRedis.size(); i++) {
+            if (!fromRedis.get(i).exists()) {
+                rebuild(fromRedis.get(i).source());
+                rereads.add(reads.get(i));
             }
         }
-        SortedIdCache.readPages(rebuilt, beforeId, wanted).forEach(p -> pages.put(p.source(), p));
+        fromRedis.removeIf(p -> !p.exists());
+        fromRedis.addAll(SortedIdCache.readPages(rereads));
+
+        for (SourcePage page : fromRedis) {
+            if (page.source().cache() == celebrityPosts) {
+                // A celebrity without posts is cached as an empty snapshot too: no rebuild query for 2 s.
+                var snapshot = new CelebrityPostsSnapshot(page.ids(), page.size());
+                celebrityLocalCache.put(page.source().ownerId(), snapshot);
+                pages.put(page.source(), snapshot.page(page.source(), beforeId, wanted));
+            } else {
+                pages.put(page.source(), page);
+            }
+        }
 
         for (SourcePage page : pages.values()) {
             candidates.addAll(page.ids());
