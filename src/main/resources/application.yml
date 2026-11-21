@@ -38,10 +38,6 @@ spring:
 server:
   port: ${SERVER_PORT:8080}
 
-twitter:
-  snowflake:
-    worker-id: ${SNOWFLAKE_WORKER_ID:0}
-
 management:
   endpoints:
     web:
