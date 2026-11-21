@@ -33,7 +33,9 @@ services:
     ports:
       - "6380:6379"
     # AOF persistence: timelines survive a container restart (they can also be rebuilt, but that is slow).
-    command: ["redis-server", "--appendonly", "yes"]
+    # Memory cap as a safety net behind the 7-day timeline TTL: when full, Redis evicts the least recently
+    # used keys. Safe because everything in this Redis is a cache that the app can rebuild from PostgreSQL.
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
     volumes:
       - redis-data:/data
     healthcheck:

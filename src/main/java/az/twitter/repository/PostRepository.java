@@ -30,4 +30,13 @@ public interface PostRepository extends JpaRepository<PostEntity, Long> {
             ORDER BY p.id DESC
             """)
     List<PostEntity> findHomeTimeline(@Param("userId") long userId, @Param("beforeId") long beforeId, Limit limit);
+
+    /** Same rows as {@link #findHomeTimeline}, ids only: used to rebuild an expired Redis timeline. */
+    @Query("""
+            SELECT p.id FROM PostEntity p
+            WHERE p.userId = :userId
+               OR p.userId IN (SELECT f.id.followeeId FROM FollowEntity f WHERE f.id.followerId = :userId)
+            ORDER BY p.id DESC
+            """)
+    List<Long> findHomeTimelineIds(@Param("userId") long userId, Limit limit);
 }

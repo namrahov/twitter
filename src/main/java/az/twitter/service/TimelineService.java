@@ -28,9 +28,17 @@ public class TimelineService {
 
     /**
      * Redis first (precomputed by FanoutWorker); whatever Redis cannot supply comes from the SQL join:
-     * a cold/empty timeline, or pages older than the newest {@link TimelineCacheRepository#MAX_ENTRIES}.
+     * an empty timeline, or pages older than the newest {@link TimelineCacheRepository#MAX_ENTRIES}.
+     *
+     * <p>Every read refreshes the key's TTL. If the key is gone (user was inactive, so it expired and fan-out
+     * stopped writing to it), it is rebuilt from SQL first: the first read after a break is slower, later ones fast.
      */
     public CursorPage<PostResponse> home(long userId, long beforeId, int limit) {
+        if (!timelines.touch(userId)) {
+            timelines.rebuild(userId,
+                    posts.findHomeTimelineIds(userId, Limit.of(TimelineCacheRepository.MAX_ENTRIES)));
+        }
+
         int wanted = limit + 1; // one extra row tells us whether a next page exists
 
         List<Long> cachedIds = timelines.page(userId, beforeId, wanted);

@@ -8,6 +8,7 @@ Kafka and Redis for the twitter app. PostgreSQL is not here: it runs on the host
 | Redis | `redis:7.4.2` | `6380` |
 
 Redis uses host port 6380 so it does not clash with a Redis already installed on the machine.
+It is capped at 256 MB and evicts least recently used keys when full (`allkeys-lru`): it only holds caches.
 The app defaults match these ports (`KAFKA_BOOTSTRAP_SERVERS=localhost:9092`, `REDIS_PORT=6380`).
 
 ## Run
