@@ -8,6 +8,7 @@ import az.twitter.entity.PostEntity;
 import az.twitter.exception.CacheUnavailableException;
 import az.twitter.repository.CelebrityPostsCacheRepository;
 import az.twitter.repository.FollowRepository;
+import az.twitter.repository.FollowingCacheRepository;
 import az.twitter.repository.PostRepository;
 import az.twitter.repository.SortedIdCache;
 import az.twitter.repository.SortedIdCache.Read;
@@ -21,6 +22,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.concurrent.CompletableFuture;
@@ -56,6 +58,8 @@ public class TimelineService {
     private final AsyncCache<Long, CelebrityPostsSnapshot> celebrityLocalCache;
     private final CelebrityPostsLoader celebrityLoader;
     private final CacheInvalidationService invalidation;
+    private final FollowingCacheRepository following;
+    private final CelebrityDirectory celebrities;
     private final RedisGuard redis;
     private final Bulkhead sqlFallbackBulkhead;
 
@@ -63,9 +67,11 @@ public class TimelineService {
                            FollowRepository follows, PostRepository posts, PostService postService,
                            AsyncCache<Long, CelebrityPostsSnapshot> celebrityPostsLocalCache,
                            CelebrityPostsLoader celebrityLoader, CacheInvalidationService invalidation,
-                           RedisGuard redis,
+                           FollowingCacheRepository following, CelebrityDirectory celebrities, RedisGuard redis,
                            @Value("${twitter.timeline.sql-fallback-max-concurrent}") int sqlFallbackMaxConcurrent) {
         this.timelines = timelines;
+        this.following = following;
+        this.celebrities = celebrities;
         this.celebrityPosts = celebrityPosts;
         this.follows = follows;
         this.posts = posts;
@@ -133,11 +139,15 @@ public class TimelineService {
         }
         pages.add(ownPage);
 
+        // Whom the user follows, from Redis (rebuilt from SQL if missing). The celebrities among them are known
+        // from the in-memory celebrity set: no database query per request.
+        Set<Long> followees = followeesOf(userId);
+        List<Long> celebrityIds = followees.stream().filter(celebrities::isCelebrity).toList();
+
         // Pull part: one shared list per followed celebrity, through L1. Lists missing in L1 are loaded together
         // (one Redis pipeline); concurrent requests missing the same celebrity wait for that one load.
         // While invalidation messages may be getting lost, L1 copies could be stale: read Redis directly then.
-        List<Long> celebrityIds = follows.findCelebrityFolloweeIds(userId);
-        Map<Long, CelebrityPostsSnapshot> snapshots = invalidation.isCelebrityCacheTrusted()
+        Map<Long, CelebrityPostsSnapshot> snapshots = invalidation.isLocalCacheTrusted()
                 ? celebrityLocalCache
                         .getAll(celebrityIds, (missing, executor) ->
                                 CompletableFuture.completedFuture(celebrityLoader.load(missing)))
@@ -153,16 +163,34 @@ public class TimelineService {
 
         long reliableAbove = floor;
         List<Long> ids = candidates.stream().filter(id -> id > reliableAbove).limit(wanted).toList();
-        // Content: from the tweet:{id} cache, PostgreSQL only for misses.
-        List<CachedPost> rows = new ArrayList<>(postService.getMany(ids));
+        // Content: from the tweet:{id} cache, PostgreSQL only for misses. Deleted tweets have no content and drop
+        // out here. So do tweets of accounts the user no longer follows: a fan-out that raced with the unfollow
+        // can write one into the timeline after the unfollow cleanup.
+        List<CachedPost> rows = new ArrayList<>(postService.getMany(ids).stream()
+                .filter(p -> p.userId() == userId || followees.contains(p.userId()))
+                .toList());
 
-        // SQL (the full JOIN over all followees) fills the rest: deep pages, trimmed or empty caches.
-        if (ids.size() < wanted) {
+        // SQL (the full JOIN over all followees) fills the rest: deep pages, trimmed caches, dropped rows.
+        // Not needed for a user who follows nobody, as long as their own tweets were not trimmed from the cache:
+        // the SQL could only return own tweets, and those are all in it.
+        boolean cacheHasEverything = followees.isEmpty() && !ownPage.trimmed();
+        if (rows.size() < wanted && !cacheHasEverything) {
             long sqlBefore = ids.isEmpty() ? beforeId : ids.getLast();
-            posts.findHomeTimeline(userId, sqlBefore, Limit.of(wanted - ids.size()))
+            posts.findHomeTimeline(userId, sqlBefore, Limit.of(wanted - rows.size()))
                     .forEach(p -> rows.add(CachedPost.from(p)));
         }
         return CursorPage.of(rows, limit, CachedPost::id, PostResponse::from);
+    }
+
+    /** Per-user, so no stampede risk: a missing key (inactive user) is simply rebuilt from SQL. */
+    private Set<Long> followeesOf(long userId) {
+        Optional<Set<Long>> cached = redis.call(() -> following.read(userId));
+        if (cached.isPresent()) {
+            return cached.get();
+        }
+        List<Long> followeeIds = follows.findFolloweeIds(userId);
+        redis.run(() -> following.rebuild(userId, followeeIds));
+        return Set.copyOf(followeeIds);
     }
 
     /**

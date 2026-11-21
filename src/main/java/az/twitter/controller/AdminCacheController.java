@@ -65,8 +65,8 @@ public class AdminCacheController {
 
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("instance", instance);
-        // false while invalidation messages may be lost: timelines then skip the celebrity L1 and read Redis
-        result.put("celebrityCacheTrusted", invalidation.isCelebrityCacheTrusted());
+        // false while invalidation messages may be lost: reads then skip L1 and go to Redis
+        result.put("localCacheTrusted", invalidation.isLocalCacheTrusted());
         result.put("tweets", Map.of("size", tweets.size(), "entries", tweetEntries));
         result.put("celebrityPosts", Map.of("size", celebrities.size(), "entries", celebrityEntries));
         return result;

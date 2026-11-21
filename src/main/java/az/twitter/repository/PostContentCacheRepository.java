@@ -22,7 +22,10 @@ import tools.jackson.databind.json.JsonMapper;
 @Repository
 public class PostContentCacheRepository {
 
-    /** Tweets are immutable for now (no edit/delete), so a long TTL is safe; LRU evicts cold ones earlier. */
+    /**
+     * Long TTL: an edit or delete removes the entry explicitly ({@link #delete}), so the TTL only bounds memory
+     * (and is the last safety net should a removal be missed); LRU evicts cold ones earlier.
+     */
     static final Duration TTL = Duration.ofHours(24);
 
     private final StringRedisTemplate redis;
@@ -68,6 +71,11 @@ public class PostContentCacheRepository {
                 return null;
             }
         });
+    }
+
+    /** The next read loads the current row from PostgreSQL (or finds nothing, if the tweet was deleted). */
+    public void delete(long id) {
+        redis.delete(key(id));
     }
 
     private static String key(long id) {

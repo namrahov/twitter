@@ -1,6 +1,8 @@
 package az.twitter.config;
 
 import az.twitter.dto.event.TweetCreatedEvent;
+import az.twitter.dto.event.TweetDeletedEvent;
+import az.twitter.dto.event.TweetEditedEvent;
 import az.twitter.dto.event.UserFollowedEvent;
 import az.twitter.dto.event.UserUnfollowedEvent;
 
@@ -18,7 +20,12 @@ import tools.jackson.core.JacksonException;
 @Configuration
 public class KafkaConfig {
 
-    public static final String TWEET_CREATED_TOPIC = "tweet-created";
+    /**
+     * Created, edited and deleted tweets share one topic, keyed by author, so for one tweet they are handled in
+     * order (a delete never overtakes the fan-out of its create). The name is from when it carried creates only;
+     * kept so existing consumer offsets stay valid.
+     */
+    public static final String TWEET_EVENTS_TOPIC = "tweet-created";
 
     /**
      * Follow and unfollow share one topic, keyed by follower: Kafka keeps order only within a partition,
@@ -32,7 +39,7 @@ public class KafkaConfig {
     /** Which topic an outbox row of a given event type goes to. */
     public static String topicFor(String eventType) {
         return switch (eventType) {
-            case TweetCreatedEvent.TYPE -> TWEET_CREATED_TOPIC;
+            case TweetCreatedEvent.TYPE, TweetEditedEvent.TYPE, TweetDeletedEvent.TYPE -> TWEET_EVENTS_TOPIC;
             case UserFollowedEvent.TYPE, UserUnfollowedEvent.TYPE -> FOLLOW_EVENTS_TOPIC;
             default -> throw new IllegalArgumentException("No topic for event type " + eventType);
         };
@@ -41,7 +48,7 @@ public class KafkaConfig {
     /** Created on startup by KafkaAdmin if missing. 3 partitions = up to 3 fan-out consumers in parallel. */
     @Bean
     public NewTopic tweetCreatedTopic() {
-        return TopicBuilder.name(TWEET_CREATED_TOPIC).partitions(3).replicas(1).build();
+        return TopicBuilder.name(TWEET_EVENTS_TOPIC).partitions(3).replicas(1).build();
     }
 
     @Bean
@@ -52,7 +59,7 @@ public class KafkaConfig {
     /** Same partition count as the source topics: a dead letter keeps its original partition (and key order). */
     @Bean
     public NewTopic tweetCreatedDltTopic() {
-        return TopicBuilder.name(dltOf(TWEET_CREATED_TOPIC)).partitions(3).replicas(1).build();
+        return TopicBuilder.name(dltOf(TWEET_EVENTS_TOPIC)).partitions(3).replicas(1).build();
     }
 
     @Bean

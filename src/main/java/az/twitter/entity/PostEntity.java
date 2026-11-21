@@ -28,6 +28,10 @@ public class PostEntity implements Persistable<Long> {
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt;
 
+    /** Null until the author edits the tweet. */
+    @Column(name = "edited_at")
+    private Instant editedAt;
+
     @Transient
     private boolean isNew = true;
 
@@ -45,6 +49,15 @@ public class PostEntity implements Persistable<Long> {
     @PostLoad
     void markNotNew() {
         this.isNew = false;
+    }
+
+    public void edit(String newContent, Instant at) {
+        this.content = newContent;
+        this.editedAt = at;
+    }
+
+    public Instant getEditedAt() {
+        return editedAt;
     }
 
     @Override

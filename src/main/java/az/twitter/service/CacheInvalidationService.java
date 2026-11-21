@@ -27,14 +27,11 @@ import tools.jackson.databind.json.JsonMapper;
  * <ul>
  *   <li>Lost: the subscription connection dropped (Lettuce reports it at once, see CacheInvalidationConfig), or
  *       this instance's own heartbeat ping has not come back for {@link #STALE_AFTER} (covers a connection that
- *       hangs without dropping). From then on the celebrity L1 is bypassed: reads go to Redis directly.</li>
+ *       hangs without dropping). From then on both L1 caches are bypassed: reads go to Redis directly.</li>
  *   <li>Back: the first own ping that arrives again proves the subscription is live. Any invalidation sent during
- *       the gap may be missing, so the whole celebrity L1 is cleared before it is trusted again.</li>
+ *       the gap may be missing, so both L1 caches are cleared before they are trusted again.</li>
  * </ul>
  * A message lost without a disconnect being noticed is still bounded by the L1 TTL (the last safety net).
- *
- * <p>Only the celebrity cache is handled this way: tweets cannot change yet, so a tweet copy cannot go stale.
- * Once tweets can be edited or deleted, the tweet cache needs the same bypass and clear.
  */
 @Service
 public class CacheInvalidationService {
@@ -90,8 +87,8 @@ public class CacheInvalidationService {
         log.debug("L1 invalidated: {} {}", message.cache(), message.id());
     }
 
-    /** False while invalidations may be getting lost: then do not read the celebrity L1, go to Redis. */
-    public boolean isCelebrityCacheTrusted() {
+    /** False while invalidations may be getting lost: then do not read L1, go to Redis. */
+    public boolean isLocalCacheTrusted() {
         return trusted;
     }
 
@@ -119,8 +116,9 @@ public class CacheInvalidationService {
                 if (!trusted) {
                     // Clear first, trust after: a request must never read a copy that may have missed a message.
                     celebrityPostsLocalCache.synchronous().invalidateAll();
+                    tweetLocalCache.synchronous().invalidateAll();
                     trusted = true;
-                    log.info("L1 invalidation channel live; celebrity L1 cleared and in use again");
+                    log.info("L1 invalidation channel live; L1 caches cleared and in use again");
                 }
             }
         }
@@ -134,7 +132,7 @@ public class CacheInvalidationService {
     private synchronized void distrust(String reason) {
         if (trusted) {
             trusted = false;
-            log.warn("L1 invalidation channel down ({}); celebrity L1 bypassed until it is back", reason);
+            log.warn("L1 invalidation channel down ({}); L1 caches bypassed until it is back", reason);
         }
     }
 }

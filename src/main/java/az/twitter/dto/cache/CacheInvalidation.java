@@ -10,7 +10,7 @@ package az.twitter.dto.cache;
 public record CacheInvalidation(LocalCache cache, long id) {
 
     public enum LocalCache {
-        /** {@code tweetLocalCache}: for when tweets become editable or deletable. */
+        /** {@code tweetLocalCache}: a tweet was edited or deleted. */
         TWEET,
         /** {@code celebrityPostsLocalCache}: a celebrity posted a new tweet. */
         CELEBRITY_POSTS

@@ -36,7 +36,7 @@ public class DeadLetterReplayer {
     }
 
     @KafkaListener(id = LISTENER_ID, autoStartup = "false", groupId = "dlt-replay",
-            topics = {KafkaConfig.TWEET_CREATED_TOPIC + KafkaConfig.DLT_SUFFIX,
+            topics = {KafkaConfig.TWEET_EVENTS_TOPIC + KafkaConfig.DLT_SUFFIX,
                     KafkaConfig.FOLLOW_EVENTS_TOPIC + KafkaConfig.DLT_SUFFIX})
     public void replay(ConsumerRecord<String, String> deadLetter) throws Exception {
         String originalTopic = deadLetter.topic().substring(0, deadLetter.topic().length() - KafkaConfig.DLT_SUFFIX.length());

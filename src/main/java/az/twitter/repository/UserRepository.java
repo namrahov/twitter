@@ -2,6 +2,8 @@ package az.twitter.repository;
 
 import az.twitter.entity.UserEntity;
 
+import java.util.List;
+
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
@@ -28,4 +30,8 @@ public interface UserRepository extends JpaRepository<UserEntity, Long> {
     default boolean isCelebrity(long id) {
         return Boolean.TRUE.equals(findCelebrityFlag(id));
     }
+
+    /** All celebrity ids; index-only scan over the partial index idx_users_celebrity. */
+    @Query(value = "SELECT id FROM users WHERE celebrity", nativeQuery = true)
+    List<Long> findCelebrityIds();
 }

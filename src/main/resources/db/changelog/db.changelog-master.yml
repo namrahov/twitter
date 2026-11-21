@@ -17,3 +17,6 @@ databaseChangeLog:
   - include:
       file: changes/006-follower-count-events.sql
       relativeToChangelogFile: true
+  - include:
+      file: changes/007-celebrity-index-and-post-edits.sql
+      relativeToChangelogFile: true
