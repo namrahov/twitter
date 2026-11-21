@@ -6,13 +6,11 @@ import az.twitter.dto.response.CursorPage;
 import az.twitter.dto.response.UserResponse;
 import az.twitter.entity.UserEntity;
 import az.twitter.repository.FollowRepository;
-import az.twitter.repository.UserRepository;
 
 import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
 
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.domain.Limit;
 import org.springframework.http.HttpStatus;
@@ -25,23 +23,19 @@ public class FollowService {
 
     private final FollowRepository follows;
     private final UserService users;
-    private final UserRepository userRepository;
     private final OutboxService outbox;
-    private final long celebrityThreshold;
 
-    public FollowService(FollowRepository follows, UserService users, UserRepository userRepository,
-                         OutboxService outbox,
-                         @Value("${twitter.timeline.celebrity-threshold}") long celebrityThreshold) {
+    public FollowService(FollowRepository follows, UserService users, OutboxService outbox) {
         this.follows = follows;
         this.users = users;
-        this.userRepository = userRepository;
         this.outbox = outbox;
-        this.celebrityThreshold = celebrityThreshold;
     }
 
     /**
-     * Inserts the follow and, in the same transaction, queues a UserFollowed event; a worker then backfills
-     * the followee's recent tweets into the follower's Redis timeline. Already following → no event.
+     * Inserts the follow and, in the same transaction, queues a UserFollowed event. Workers then backfill the
+     * followee's recent tweets into the follower's timeline and count the follower (FollowerCountWorker).
+     * The counter is deliberately not updated here: that would lock the followee's users row on every follow.
+     * Already following → no event.
      */
     @Transactional
     public void follow(long followerId, long followeeId) {
@@ -58,7 +52,6 @@ public class FollowService {
         if (inserted == 0) {
             return;
         }
-        userRepository.incrementFollowerCount(followeeId, celebrityThreshold);
         var event = new UserFollowedEvent(UUID.randomUUID(), followerId, followeeId, Instant.now());
         // Key = follower: same key and topic as UserUnfollowed, so the two stay ordered.
         outbox.append(event.eventId(), UserFollowedEvent.TYPE, followeeId, followerId, event);
@@ -74,7 +67,6 @@ public class FollowService {
         if (follows.delete(followerId, followeeId) == 0) {
             return;
         }
-        userRepository.decrementFollowerCount(followeeId);
         var event = new UserUnfollowedEvent(UUID.randomUUID(), followerId, followeeId, Instant.now());
         // Key = follower: one user's follow/unfollow events stay ordered in one partition.
         outbox.append(event.eventId(), UserUnfollowedEvent.TYPE, followeeId, followerId, event);
