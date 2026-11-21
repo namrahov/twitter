@@ -14,3 +14,6 @@ databaseChangeLog:
   - include:
       file: changes/005-users-follower-count.sql
       relativeToChangelogFile: true
+  - include:
+      file: changes/006-follower-count-events.sql
+      relativeToChangelogFile: true
