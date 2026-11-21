@@ -13,8 +13,8 @@ import org.springframework.context.annotation.Configuration;
 /**
  * L1: in-process caches (Caffeine) in front of Redis, only for data that many users read at the same time.
  * They take the hot-key load off Redis: with N app instances, a hot key costs Redis about N reads per TTL
- * instead of one read per request. Each instance has its own copy, so data can differ between instances
- * for up to the TTL. Per-user timelines are not here: nobody else reads them, so L1 would not help.
+ * instead of one read per request. Each instance has its own copy; changes reach all copies through
+ * Redis Pub/Sub invalidation (CacheInvalidationService), with the TTL as the upper bound. Per-user timelines are not here: nobody else reads them, so L1 would not help.
  *
  * <p>Async caches on purpose: a key being loaded holds a future, so concurrent requests missing the same key
  * wait for that one load instead of each loading it again (request coalescing — stampede protection
@@ -36,14 +36,16 @@ public class LocalCacheConfig {
     }
 
     /**
-     * Celebrity posts lists. Short TTL: a new celebrity tweet shows up here at most 2 s later
-     * (within the 5 s freshness goal), while a celebrity read by millions costs Redis one read per 2 s per instance.
+     * Celebrity posts lists. A new celebrity tweet does not wait for the TTL: the fan-out worker publishes an
+     * invalidation (CacheInvalidationService) and every instance drops its copy at once. The TTL is only the
+     * safety net for an instance that missed that message (Pub/Sub is not durable), so it can be longer than
+     * before (it was 2 s): a celebrity read by millions costs Redis one read per 30 s per instance, or per tweet.
      */
     @Bean
     public AsyncCache<Long, CelebrityPostsSnapshot> celebrityPostsLocalCache() {
         return Caffeine.newBuilder()
                 .maximumSize(10_000)
-                .expireAfterWrite(Duration.ofSeconds(2))
+                .expireAfterWrite(Duration.ofSeconds(30))
                 .buildAsync();
     }
 }
