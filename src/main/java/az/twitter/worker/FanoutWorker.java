@@ -3,6 +3,7 @@ package az.twitter.worker;
 import az.twitter.config.KafkaConfig;
 import az.twitter.dto.event.TweetCreatedEvent;
 import az.twitter.repository.CelebrityPostsCacheRepository;
+import az.twitter.repository.FanoutProgressRepository;
 import az.twitter.repository.FollowRepository;
 import az.twitter.repository.TimelineCacheRepository;
 import az.twitter.repository.UserRepository;
@@ -35,20 +36,24 @@ public class FanoutWorker {
     private final UserRepository users;
     private final TimelineCacheRepository timelines;
     private final CelebrityPostsCacheRepository celebrityPosts;
+    private final FanoutProgressRepository progress;
     private final JsonMapper json;
 
     public FanoutWorker(FollowRepository follows, UserRepository users, TimelineCacheRepository timelines,
-                        CelebrityPostsCacheRepository celebrityPosts, JsonMapper json) {
+                        CelebrityPostsCacheRepository celebrityPosts, FanoutProgressRepository progress,
+                        JsonMapper json) {
         this.follows = follows;
         this.users = users;
         this.timelines = timelines;
         this.celebrityPosts = celebrityPosts;
+        this.progress = progress;
         this.json = json;
     }
 
     /**
-     * Safe to run twice for the same event (redelivery, or a crash halfway through): every write is an idempotent ZADD,
-     * so the retry simply redoes all batches. On an exception Kafka does not commit the offset and redelivers.
+     * Safe to run twice for the same event (redelivery, or a crash halfway through): every write is an idempotent
+     * ZADD. On an exception Kafka does not commit the offset and redelivers; a redelivered event resumes from the
+     * checkpoint after the last completed batch instead of rewriting every follower's timeline.
      */
     @KafkaListener(topics = KafkaConfig.TWEET_CREATED_TOPIC, groupId = "fanout")
     public void onTweetCreated(String payload) {
@@ -63,7 +68,11 @@ public class FanoutWorker {
             return;
         }
 
-        long afterId = 0;
+        long afterId = progress.lastFollowerId(event.eventId());
+        if (afterId > 0) {
+            log.info("Resuming fan-out of tweet {} after follower {}", event.tweetId(), afterId);
+        }
+        boolean checkpointed = afterId > 0;
         int total = 0;
         while (true) {
             List<Long> followerIds = follows.findFollowerIds(event.authorId(), afterId, Limit.of(FOLLOWER_BATCH));
@@ -76,6 +85,12 @@ public class FanoutWorker {
                 break;
             }
             afterId = followerIds.getLast();
+            // Only multi-batch fan-outs are checkpointed: a single batch is cheap to redo.
+            progress.save(event.eventId(), afterId);
+            checkpointed = true;
+        }
+        if (checkpointed) {
+            progress.clear(event.eventId());
         }
         log.debug("Fanned out tweet {} to {} followers", event.tweetId(), total);
     }

@@ -5,11 +5,15 @@ import az.twitter.dto.event.UserFollowedEvent;
 import az.twitter.dto.event.UserUnfollowedEvent;
 
 import org.apache.kafka.clients.admin.NewTopic;
+import org.apache.kafka.common.TopicPartition;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.kafka.config.TopicBuilder;
+import org.springframework.kafka.core.KafkaOperations;
+import org.springframework.kafka.listener.DeadLetterPublishingRecoverer;
 import org.springframework.kafka.listener.DefaultErrorHandler;
 import org.springframework.util.backoff.FixedBackOff;
+import tools.jackson.core.JacksonException;
 
 @Configuration
 public class KafkaConfig {
@@ -45,13 +49,36 @@ public class KafkaConfig {
         return TopicBuilder.name(FOLLOW_EVENTS_TOPIC).partitions(3).replicas(1).build();
     }
 
+    /** Same partition count as the source topics: a dead letter keeps its original partition (and key order). */
+    @Bean
+    public NewTopic tweetCreatedDltTopic() {
+        return TopicBuilder.name(dltOf(TWEET_CREATED_TOPIC)).partitions(3).replicas(1).build();
+    }
+
+    @Bean
+    public NewTopic followEventsDltTopic() {
+        return TopicBuilder.name(dltOf(FOLLOW_EVENTS_TOPIC)).partitions(3).replicas(1).build();
+    }
+
+    public static final String DLT_SUFFIX = ".DLT";
+
+    public static String dltOf(String topic) {
+        return topic + DLT_SUFFIX;
+    }
+
     /**
-     * Without this, a failed record is retried with no delay and then skipped. Retry for ~10 s instead
-     * (covers a short Redis/DB blip); after that the record is logged and skipped. A skipped fan-out is not
-     * data loss: the timeline read falls back to SQL. A dead-letter topic would be the next step.
+     * Retry a failed record for ~10 s (covers a short Redis/DB blip), then move it to {@code <topic>.DLT}
+     * instead of dropping it, so it can be replayed once the problem is fixed (see DeadLetterReplayer).
+     * Unparseable payloads go to the DLT at once: retrying cannot fix them.
+     * Records failing in the replayer itself go back to the same DLT, not to a {@code .DLT.DLT}.
      */
     @Bean
-    public DefaultErrorHandler kafkaErrorHandler() {
-        return new DefaultErrorHandler(new FixedBackOff(1000, 9));
+    public DefaultErrorHandler kafkaErrorHandler(KafkaOperations<String, String> kafka) {
+        var recoverer = new DeadLetterPublishingRecoverer(kafka, (record, exception) -> new TopicPartition(
+                record.topic().endsWith(DLT_SUFFIX) ? record.topic() : dltOf(record.topic()),
+                record.partition()));
+        var handler = new DefaultErrorHandler(recoverer, new FixedBackOff(1000, 9));
+        handler.addNotRetryableExceptions(JacksonException.class);
+        return handler;
     }
 }
