@@ -7,11 +7,15 @@ import az.twitter.repository.CelebrityPostsCacheRepository;
 import az.twitter.repository.FollowRepository;
 import az.twitter.repository.PostRepository;
 import az.twitter.repository.SortedIdCache;
+import az.twitter.repository.SortedIdCache.Source;
+import az.twitter.repository.SortedIdCache.SourcePage;
 import az.twitter.repository.TimelineCacheRepository;
 
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.TreeSet;
 
 import org.springframework.data.domain.Limit;
@@ -53,19 +57,31 @@ public class TimelineService {
         // Ids at or below this are not reliably covered by every cache (one of them was trimmed above it).
         long floor = Long.MIN_VALUE;
 
-        // Push part. Every read refreshes the TTL; a missing key (inactive user) is rebuilt from SQL first.
-        if (!timelines.touch(userId)) {
-            timelines.rebuild(userId, posts.findPushedTimelineIds(userId, TimelineCacheRepository.MAX_ENTRIES));
-        }
-        floor = Math.max(floor, collect(timelines, userId, beforeId, wanted, candidates));
-
-        // Pull part: one shared list per followed celebrity (cache-aside: rebuilt from SQL when missing).
+        // Sources: the user's own timeline (push part) + one shared list per followed celebrity (pull part).
+        List<Source> sources = new ArrayList<>();
+        sources.add(new Source(timelines, userId));
         for (long celebrityId : follows.findCelebrityFolloweeIds(userId)) {
-            if (!celebrityPosts.touch(celebrityId)) {
-                celebrityPosts.rebuild(celebrityId,
-                        posts.findLatestIds(celebrityId, Limit.of(CelebrityPostsCacheRepository.MAX_ENTRIES)));
+            sources.add(new Source(celebrityPosts, celebrityId));
+        }
+
+        // One Redis round trip for all of them (TTL refresh + page + size per list), however many celebrities.
+        Map<Source, SourcePage> pages = new LinkedHashMap<>();
+        SortedIdCache.readPages(sources, beforeId, wanted).forEach(p -> pages.put(p.source(), p));
+
+        // Expired lists (inactive user, celebrity nobody read for a day): rebuild from SQL, then read just those
+        // again — a second round trip only when something was missing.
+        List<Source> rebuilt = new ArrayList<>();
+        for (SourcePage page : pages.values()) {
+            if (!page.exists()) {
+                rebuild(page.source());
+                rebuilt.add(page.source());
             }
-            floor = Math.max(floor, collect(celebrityPosts, celebrityId, beforeId, wanted, candidates));
+        }
+        SortedIdCache.readPages(rebuilt, beforeId, wanted).forEach(p -> pages.put(p.source(), p));
+
+        for (SourcePage page : pages.values()) {
+            candidates.addAll(page.ids());
+            floor = Math.max(floor, floorOf(page, beforeId, wanted));
         }
 
         long reliableAbove = floor;
@@ -82,8 +98,18 @@ public class TimelineService {
         return CursorPage.of(rows, limit, CachedPost::id, PostResponse::from);
     }
 
+    private void rebuild(Source source) {
+        if (source.cache() == timelines) {
+            timelines.rebuild(source.ownerId(),
+                    posts.findPushedTimelineIds(source.ownerId(), TimelineCacheRepository.MAX_ENTRIES));
+        } else {
+            celebrityPosts.rebuild(source.ownerId(),
+                    posts.findLatestIds(source.ownerId(), Limit.of(CelebrityPostsCacheRepository.MAX_ENTRIES)));
+        }
+    }
+
     /**
-     * Adds one source's page to the candidates.
+     * How far down one source's page can be trusted.
      *
      * <p>A source that returned a full page is fine: the merged page can never need anything older from it.
      * A source that returned less is fine too if it is complete (holds everything it should, i.e. was not trimmed).
@@ -92,12 +118,10 @@ public class TimelineService {
      *
      * @return the floor (ids at or below it are not covered), or {@code Long.MIN_VALUE} if there is none
      */
-    private static long collect(SortedIdCache cache, long ownerId, long beforeId, int wanted, TreeSet<Long> into) {
-        List<Long> page = cache.page(ownerId, beforeId, wanted);
-        into.addAll(page);
-        if (page.size() == wanted || cache.size(ownerId) < cache.maxEntries()) {
+    private static long floorOf(SourcePage page, long beforeId, int wanted) {
+        if (page.ids().size() == wanted || !page.trimmed()) {
             return Long.MIN_VALUE;
         }
-        return page.isEmpty() ? beforeId : page.getLast() - 1;
+        return page.ids().isEmpty() ? beforeId : page.ids().getLast() - 1;
     }
 }
