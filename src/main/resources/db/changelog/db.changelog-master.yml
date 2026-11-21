@@ -8,3 +8,6 @@ databaseChangeLog:
   - include:
       file: changes/003-snowflake-workers.sql
       relativeToChangelogFile: true
+  - include:
+      file: changes/004-outbox-claim-and-cleanup.sql
+      relativeToChangelogFile: true

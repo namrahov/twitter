@@ -69,15 +69,6 @@ public class OutboxEventEntity implements Persistable<UUID> {
         this.payload = payload;
     }
 
-    public void markPublished(Instant at) {
-        this.status = OutboxStatus.PUBLISHED;
-        this.publishedAt = at;
-    }
-
-    public void recordFailedAttempt() {
-        this.attempts++;
-    }
-
     @PostPersist
     @PostLoad
     void markNotNew() {
@@ -104,9 +95,5 @@ public class OutboxEventEntity implements Persistable<UUID> {
 
     public String getPayload() {
         return payload;
-    }
-
-    public int getAttempts() {
-        return attempts;
     }
 }
